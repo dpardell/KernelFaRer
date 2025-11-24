@@ -346,23 +346,56 @@ static inline auto matchSYR2KStore(const Value *C, Value *&AddLHS,
 // values, a initialization value (ConstantInt) and a post-increment value
 // (AddInst). A chain of PHINodes is the IR pattern produced when compiling
 // tiled loop nests.
-static inline PHINode *extractOutermostPHI(PHINode *const &V, Value *&Inc) {
+static inline PHINode *extractOutermostPHI(PHINode *const &V) {
   if (!isa<PHINode>(V))
     return nullptr;
 
   SmallSetVector<const PHINode *, 8> WorkQueue;
   WorkQueue.insert(V);
-
   while (!WorkQueue.empty()) {
     const auto *PHI = WorkQueue.front();
     WorkQueue.remove(PHI);
 
     if (match(
             PHI,
-            m_OneOf(m_PHI(m_c_Add(m_Specific(PHI), m_Value(Inc)), m_ConstantInt()),
-                    m_PHI(m_ConstantInt(), m_c_Add(m_Specific(PHI), m_Value(Inc))),
+            m_OneOf(m_PHI(m_c_Add(m_Specific(PHI), m_Value()), m_ConstantInt()),
+                    m_PHI(m_ConstantInt(), m_c_Add(m_Specific(PHI), m_Value())),
                     m_PHI(m_ConstantInt(), m_ConstantInt()))))
       return const_cast<PHINode *>(PHI);
+
+    for (const Use &Op : PHI->incoming_values())
+      if (auto *InPHI = dyn_cast_or_null<PHINode>(&Op))
+        WorkQueue.insert(InPHI);
+  }
+  return nullptr;
+}
+
+// A helper function for extracting the increment corresponding to the inner loop.
+static inline Value *extractIncrement(PHINode *const &V) {
+  if (!isa<PHINode>(V))
+  return nullptr;
+
+  SmallSetVector<const PHINode *, 8> WorkQueue;
+  WorkQueue.insert(V);
+  while (!WorkQueue.empty()) {
+    const auto *PHI = WorkQueue.front();
+    WorkQueue.remove(PHI);
+
+    Value *Inc = nullptr;
+    Value *OtherPHI = nullptr;
+    if (match(
+          PHI,
+          m_OneOf(m_PHI(m_c_Add(m_Specific(PHI), m_Value(Inc)), m_ConstantInt()),
+                  m_PHI(m_ConstantInt(), m_c_Add(m_Specific(PHI), m_Value(Inc))),
+                  m_PHI(m_ConstantInt(), m_ConstantInt()),
+                  m_PHI(m_Value(OtherPHI), m_c_Add(m_Specific(PHI), m_Value(Inc))),
+                  m_PHI(m_c_Add(m_Specific(PHI), m_Value(Inc)), m_Value(OtherPHI))))) {
+      if (Inc != nullptr) {
+        // For the new patterns, only return if OtherPHI is actually a PHI node
+        if (OtherPHI == nullptr || isa<PHINode>(OtherPHI))
+          return Inc;
+      }
+    }
 
     for (const Use &Op : PHI->incoming_values())
       if (auto *InPHI = dyn_cast_or_null<PHINode>(&Op))
@@ -533,18 +566,23 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
       C1 == nullptr || C2 == nullptr)
     return false;
   bool Matched = true;
-  Value *IncA1 = nullptr;
-  Value *IncA2 = nullptr;
-  Value *IncB1 = nullptr;
-  Value *IncB2 = nullptr;
-  Value *IncC1 = nullptr;
-  Value *IncC2 = nullptr;
-  A1 = extractOutermostPHI(A1, IncA1);
-  A2 = extractOutermostPHI(A2, IncA2);
-  B1 = extractOutermostPHI(B1, IncB1);
-  B2 = extractOutermostPHI(B2, IncB2);
-  C1 = extractOutermostPHI(C1, IncC1);
-  C2 = extractOutermostPHI(C2, IncC2);
+
+  // Extract increments from original (innermost) PHI nodes
+  Value *IncA1 = extractIncrement(A1);
+  Value *IncA2 = extractIncrement(A2);
+  Value *IncB1 = extractIncrement(B1);
+  Value *IncB2 = extractIncrement(B2);
+  Value *IncC1 = extractIncrement(C1);
+  Value *IncC2 = extractIncrement(C2);
+
+  // Extract outermost PHI nodes
+  A1 = extractOutermostPHI(A1);
+  A2 = extractOutermostPHI(A2);
+  B1 = extractOutermostPHI(B1);
+  B2 = extractOutermostPHI(B2);
+  C1 = extractOutermostPHI(C1);
+  C2 = extractOutermostPHI(C2);
+
   PHINode *II = nullptr;
   PHINode *JJ = nullptr;
   PHINode *KK = nullptr;
@@ -828,10 +866,10 @@ static void collectOtherKernelStoresToC(
             (LDC1 == nullptr || LDC1 == LDC) &&
             ((Alpha == nullptr || Alpha1 == nullptr) || Alpha == Alpha1) &&
             ((Beta == nullptr || Beta1 == nullptr) || Beta == Beta1) &&
-            (IVarI == extractOutermostPHI(PHI1, Inc1) ||
-             IVarI == extractOutermostPHI(PHI2, Inc2) ||
-             IVarJ == extractOutermostPHI(PHI1, Inc1) ||
-             IVarJ == extractOutermostPHI(PHI2, Inc2)) &&
+            (IVarI == extractOutermostPHI(PHI1) ||
+             IVarI == extractOutermostPHI(PHI2) ||
+             IVarJ == extractOutermostPHI(PHI1) ||
+             IVarJ == extractOutermostPHI(PHI2)) &&
             DT.dominates(BB, ReductionBB) && BB != ReductionBB) {
           if (Beta1 != nullptr)
             IsCReduced = true;
