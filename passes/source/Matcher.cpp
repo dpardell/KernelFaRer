@@ -602,7 +602,7 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
                               Value *&K, Value *&IncI, Value *&IncJ, Value *&IncK,
                               LoopInfo &LI) {
   
-  // Handle 1D linearized submatrix access - infer missing PHIs
+  // Handle 1D linearized submatrix access and infer missing PHIs
   if ((A2 == nullptr || C2 == nullptr) && B1 != nullptr && B2 != nullptr) {
     std::set<PHINode*> CapturedPHIs;
     if (A1) CapturedPHIs.insert(A1);
@@ -620,8 +620,7 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
       for (Loop *L = InnerLoop; L != nullptr; L = L->getParentLoop()) {
         for (auto &Phi : L->getHeader()->phis()) {
           PHINode *P = &Phi;
-          Value *Inc = nullptr;
-          if (extractOutermostPHI(P, Inc) == P) {
+          if (extractOutermostPHI(P) == P) {
             if (CapturedPHIs.find(P) == CapturedPHIs.end()) {
               MissingPHI = P;
               break;
@@ -667,19 +666,22 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
 
   // Extract increments from original (innermost) PHI nodes
   Value *IncA1 = extractIncrement(A1);
-  Value *IncA2 = extractIncrement(A2);
+  Value *IncA2 = A2 ? extractIncrement(A2) : nullptr;
   Value *IncB1 = extractIncrement(B1);
   Value *IncB2 = extractIncrement(B2);
   Value *IncC1 = extractIncrement(C1);
-  Value *IncC2 = extractIncrement(C2);
+  Value *IncC2 = C2 ? extractIncrement(C2) : nullptr;
 
   // Extract outermost PHI nodes
   A1 = extractOutermostPHI(A1);
-  A2 = extractOutermostPHI(A2);
+  if (A2) A2 = extractOutermostPHI(A2);
   B1 = extractOutermostPHI(B1);
   B2 = extractOutermostPHI(B2);
   C1 = extractOutermostPHI(C1);
-  C2 = extractOutermostPHI(C2);
+  if (C2) C2 = extractOutermostPHI(C2);
+  
+  if (A1 == nullptr || B1 == nullptr || B2 == nullptr || C1 == nullptr)
+    return false;
 
   PHINode *II = nullptr;
   PHINode *JJ = nullptr;
@@ -696,7 +698,6 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else if (A2 == C2 && B2 == C1)
       CLayout = CBLAS_ORDER::ColMajor;
     else
-      // Not GEMM
       Matched = false;
   } else if (A1 == B2) {
     II = A2;
@@ -735,7 +736,6 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else
       Matched = false;
   } else {
-    // Not GEMM
     Matched = false;
   }
   
@@ -767,7 +767,6 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
       else if (KK == C1) IncK = IncC1;
       else if (KK == C2) IncK = IncC2;
     } else {
-      // Not GEMM
       Matched = false;
     }
   }
