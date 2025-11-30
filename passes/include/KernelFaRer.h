@@ -100,7 +100,7 @@ public:
 /// loop.
 class Kernel {
 public:
-  enum KernelType { GEMM_KERNEL, SYR2K_KERNEL, UNKNOWN_KERNEL = 0xff };
+  enum KernelType { GEMM_KERNEL, SYR2K_KERNEL, TRMM_KERNEL, UNKNOWN_KERNEL = 0xff };
 
 protected:
   KernelType KernelID;
@@ -247,6 +247,46 @@ public:
     return K->getKernelID() == Kernel::SYR2K_KERNEL;
   }
 }; // class SYR2K
+
+class TRMM : public Kernel {
+  bool IsLower;
+
+public:
+  TRMM(Loop &L, Instruction &RS, Matrix &MatrixA, Matrix &MatrixB,
+       SmallSetVector<const Value *, 2> Stores, Value *Alpha = nullptr,
+       bool IsLower = true, Value *IncI = nullptr, Value *IncJ = nullptr, Value *IncK = nullptr)
+      : Kernel(Kernel::TRMM_KERNEL, L, RS, MatrixA, MatrixB, MatrixB, Stores,
+               Alpha, nullptr, IncI, IncJ, IncK),
+        IsLower(IsLower) {}
+
+  bool isLowerTriangular() const { return IsLower; }
+
+  bool isKernelStore(const Value &Store) const override {
+    return Stores.count(&Store) != 0;
+  }
+
+  bool isKernelValue(const Value &V) const override {
+    auto &M = MatrixA.getRows();
+    auto &N = MatrixB.getColumns();
+
+    auto &IndVarI = MatrixA.getRowIV();
+    auto &IndVarK = MatrixA.getColumnIV();
+    auto &IndVarJ = MatrixB.getColumnIV();
+
+    return (&V == Alpha || &V == IncI || &V == IncJ || &V == IncK || 
+            &V == &IndVarI || &V == &IndVarJ || &V == &IndVarK || 
+            &V == &M || &V == &N ||
+            &V == &MatrixA.getBaseAddressPointer() ||
+            &V == &MatrixB.getBaseAddressPointer() ||
+            &V == &MatrixA.getLeadingDimensionSize() ||
+            &V == &MatrixB.getLeadingDimensionSize());
+  }
+
+  static inline bool classof(TRMM const *) { return true; }
+  static inline bool classof(Kernel const *K) {
+    return K->getKernelID() == Kernel::TRMM_KERNEL;
+  }
+}; // class TRMM
 
 /// Performs Kernel Recognition Pass.
 struct KernelMatcher {

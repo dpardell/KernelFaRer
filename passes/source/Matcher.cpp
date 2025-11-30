@@ -269,7 +269,7 @@ match1Dor2DPtrOpAndInductionVariables(GetElementPtrInst *&GEPInst, Value *&Op,
   auto Pattern4 = m_GEP(GEPInst, m_Value(Op), m_PHI(PHI1), m_PHI(PHI2));
   auto Pattern5 = m_GEP(GEPInst, m_Value(Op), linearFunctionOfPHI(PHI1, PHI2, LD));
   
- // Linearized 2D access - GEP(base, sext(offset + PHI + LD*PHI))
+ // Linearized 2D access
  auto Pattern6 = m_GEP(
     GEPInst, m_Value(Op),
     m_CombineOr(
@@ -280,7 +280,6 @@ match1Dor2DPtrOpAndInductionVariables(GetElementPtrInst *&GEPInst, Value *&Op,
             m_SExt(m_Add(
                 m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
                 m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))))),
-        // Without sext
         m_CombineOr(
             m_Add(
                 m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))),
@@ -289,7 +288,7 @@ match1Dor2DPtrOpAndInductionVariables(GetElementPtrInst *&GEPInst, Value *&Op,
                 m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
                 m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))))));
   
-  // Nested GEP for 2D submatrix - GEP(GEP(base, PHI2), mul(add(PHI1, offset), LD))
+  // Nested GEP for 2D submatrix access
   auto Pattern7 = m_GEP(
     GEPInst, 
     m_GEP(DummyGEP, m_Value(Op), m_PHI(PHI2)),
@@ -297,14 +296,14 @@ match1Dor2DPtrOpAndInductionVariables(GetElementPtrInst *&GEPInst, Value *&Op,
         m_c_Add(m_PHI(PHI1), m_Value()),
         m_OneOf(m_SExt(m_Value(LD)), m_ZExt(m_Value(LD)), m_Value(LD))));
 
-  // 1D linearized submatrix access - GEP(base, sext(add(PHI, offset)))
+  // 1D linearized submatrix access
   auto Pattern8 = m_GEP(
     GEPInst, m_Value(Op),
     m_CombineOr(
         m_SExt(m_c_Add(m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)), m_Value())),
         m_SExt(m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))));
-  
-  return m_OneOf(Pattern1, Pattern2, Pattern3, Pattern4, Pattern5, Pattern6, Pattern7, Pattern8);
+
+return m_OneOf(Pattern1, Pattern2, Pattern3, Pattern4, Pattern5, Pattern6, Pattern7, Pattern8);
 }
 
 // A helper function that returns a matcher of a load to flat or 2D array. The
@@ -773,6 +772,73 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
   return Matched;
 }
 
+// A helper function that detects which access order (Layout) each matrix (A
+// and B) is used based on the induction variables A1/2 and B1/2. TRMM computes
+// B := alpha * A * B where A is triangular. The reduction dimension must match
+// between A and B.
+static bool matchTRMMLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
+                            PHINode *&B2, CBLAS_ORDER &ALayout,
+                            CBLAS_ORDER &BLayout, Value *&I, Value *&J,
+                            Value *&K, Value *&IncI, Value *&IncJ,
+                            Value *&IncK, LoopInfo &LI) {
+  if (A1 == nullptr || A2 == nullptr || B1 == nullptr || B2 == nullptr)
+    return false;
+
+  bool Matched = false;
+  PHINode *II = nullptr;
+  PHINode *JJ = nullptr;
+  PHINode *KK = nullptr;
+
+  if (A2 == B1) {
+    II = A1;
+    JJ = B2;
+    KK = A2;
+    ALayout = CBLAS_ORDER::RowMajor;
+    BLayout = CBLAS_ORDER::RowMajor;
+    Matched = true;
+  } else if (A1 == B1) {
+    II = A2;
+    JJ = B2;
+    KK = A1;
+    ALayout = CBLAS_ORDER::ColMajor;
+    BLayout = CBLAS_ORDER::RowMajor;
+    Matched = true;
+  } else if (A2 == B2) {
+    II = A1;
+    JJ = B1;
+    KK = A2;
+    ALayout = CBLAS_ORDER::RowMajor;
+    BLayout = CBLAS_ORDER::ColMajor;
+    Matched = true;
+  } else if (A1 == B2) {
+    II = A2;
+    JJ = B1;
+    KK = A1;
+    ALayout = CBLAS_ORDER::ColMajor;
+    BLayout = CBLAS_ORDER::ColMajor;
+    Matched = true;
+  }
+
+  if (Matched) {
+    auto DepthI = LI.getLoopDepth(II->getParent());
+    auto DepthJ = LI.getLoopDepth(JJ->getParent());
+    auto DepthK = LI.getLoopDepth(KK->getParent());
+    
+    if (DepthI != DepthJ && DepthJ != DepthK && DepthI != DepthK) {
+      I = II;
+      J = JJ;
+      K = KK;
+      IncI = extractIncrement(static_cast<PHINode *>(I));
+      IncJ = extractIncrement(static_cast<PHINode *>(J));
+      IncK = extractIncrement(static_cast<PHINode *>(K));
+    } else {
+      Matched = false;
+    }
+  }
+  return Matched;
+}
+
+
 static bool matchSyr2kIndVarAndLayout(Value *const &PtrToA, Value *&PtrToA2,
                                       Value *const &PtrToB, Value *&PtrToB2,
                                       SmallVector<PHINode *, 4> &APHI,
@@ -800,6 +866,103 @@ static bool matchSyr2kIndVarAndLayout(Value *const &PtrToA, Value *&PtrToA2,
     return true;
 
   return false;
+}
+
+
+// Helper function to extract PHI nodes from TRMM's backward-counting GEP patterns.
+// TRMM has nested GEPs with backward iteration: GEP(GEP(base, mm-1), k*lda)
+// Returns true if extraction succeeds, false otherwise.
+static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
+                                    StoreInst *Store, PHINode *&APHI1,
+                                    PHINode *&APHI2, PHINode *&BPHI1,
+                                    PHINode *&BPHI2, Value *&BasePtrToA,
+                                    Value *&BasePtrToB, Value *&LDA,
+                                    Value *&LDB) {
+  // Extract from Load0 (matrix A): GEP(GEP(base, mm-1), k*lda)
+  auto *Load0GEP = dyn_cast<GetElementPtrInst>(Load0->getPointerOperand());
+  if (!Load0GEP)
+    return false;
+
+  auto *Load0BaseGEP = dyn_cast<GetElementPtrInst>(Load0GEP->getPointerOperand());
+  if (!Load0BaseGEP)
+    return false;
+
+  BasePtrToA = Load0BaseGEP->getPointerOperand();
+  Value *Load0BaseIdx = Load0BaseGEP->getOperand(1);  // mm-1
+  Value *Load0OuterIdx = Load0GEP->getOperand(1);     // k*lda
+
+  // Extract mm PHI from (mm-1) - could be Add with -1 constant
+  if (auto *Add = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
+    if (Add->getOpcode() == Instruction::Add) {
+      if (auto *P = dyn_cast<PHINode>(Add->getOperand(0)))
+        APHI1 = P;
+      else if (auto *P = dyn_cast<PHINode>(Add->getOperand(1)))
+        APHI1 = P;
+    }
+  }
+
+  // Extract k PHI from (k*lda)
+  if (auto *Mul = dyn_cast<BinaryOperator>(Load0OuterIdx)) {
+    if (Mul->getOpcode() == Instruction::Mul) {
+      if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
+        APHI2 = P;
+        LDA = Mul->getOperand(1);
+      } else if (auto *P = dyn_cast<PHINode>(Mul->getOperand(1))) {
+        APHI2 = P;
+        LDA = Mul->getOperand(0);
+      }
+    }
+  }
+
+  if (!APHI1 || !APHI2)
+    return false;
+
+  // Extract from Load1 (matrix B): GEP(GEP(base, nn*ldb), k)
+  auto *Load1GEP = dyn_cast<GetElementPtrInst>(Load1->getPointerOperand());
+  if (!Load1GEP)
+    return false;
+
+  auto *Load1BaseGEP = dyn_cast<GetElementPtrInst>(Load1GEP->getPointerOperand());
+  if (!Load1BaseGEP)
+    return false;
+
+  BasePtrToB = Load1BaseGEP->getPointerOperand();
+  Value *Load1BaseIdx = Load1BaseGEP->getOperand(1);  // nn*ldb
+  Value *Load1OuterIdx = Load1GEP->getOperand(1);     // k
+
+  // Extract k PHI directly
+  if (auto *P = dyn_cast<PHINode>(Load1OuterIdx))
+    BPHI1 = P;
+
+  // Extract nn PHI from (nn*ldb)
+  if (auto *Mul = dyn_cast<BinaryOperator>(Load1BaseIdx)) {
+    if (Mul->getOpcode() == Instruction::Mul) {
+      if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
+        BPHI2 = P;
+        LDB = Mul->getOperand(1);
+      } else if (auto *P = dyn_cast<PHINode>(Mul->getOperand(1))) {
+        BPHI2 = P;
+        LDB = Mul->getOperand(0);
+      }
+    }
+  }
+
+  if (!BPHI1 || !BPHI2)
+    return false;
+
+  // Verify store points to same B matrix (in-place operation)
+  auto *StoreGEP = dyn_cast<GetElementPtrInst>(Store->getPointerOperand());
+  if (!StoreGEP)
+    return false;
+
+  auto *StoreBaseGEP = dyn_cast<GetElementPtrInst>(StoreGEP->getPointerOperand());
+  if (!StoreBaseGEP)
+    return false;
+
+  if (BasePtrToB != StoreBaseGEP->getPointerOperand())
+    return false;
+
+  return true;
 }
 
 // A helper function that returns true iff. SeedInst is a store instruction
@@ -853,6 +1016,134 @@ static bool matchGEMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
     IsGEMM = true;
   }
   return IsGEMM;
+}
+
+static bool matchTRMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
+                      Value *&IVarK, GetElementPtrInst *&GEPA,
+                      Value *&BasePtrToA, GetElementPtrInst *&GEPB,
+                      Value *&BasePtrToB, Value *&LDA, Value *&LDB,
+                      CBLAS_ORDER &ALayout, CBLAS_ORDER &BLayout,
+                      LoopInfo &LI, Value *&Alpha, Value *&IncI,
+                      Value *&IncJ, Value *&IncK, bool &IsLower) {
+  auto *Store = dyn_cast<StoreInst>(&SeedInst);
+  if (!Store)
+    return false;
+
+  // Skip constant stores (initializations)
+  if (isa<Constant>(Store->getValueOperand()))
+    return false;
+
+  auto *StoreValue = Store->getValueOperand();
+
+  // Check for alpha * reduction pattern
+  auto *FMul = dyn_cast<BinaryOperator>(StoreValue);
+  if (!FMul || FMul->getOpcode() != Instruction::FMul)
+    return false;
+
+  // Extract alpha and reduction
+  Value *Reduction = nullptr;
+  if (auto *FAdd = dyn_cast<BinaryOperator>(FMul->getOperand(0))) {
+    if (FAdd->getOpcode() == Instruction::FAdd) {
+      Alpha = FMul->getOperand(1);
+      Reduction = FAdd;
+    }
+  }
+  if (!Reduction) {
+    if (auto *FAdd = dyn_cast<BinaryOperator>(FMul->getOperand(1))) {
+      if (FAdd->getOpcode() == Instruction::FAdd) {
+        Alpha = FMul->getOperand(0);
+        Reduction = FAdd;
+      }
+    }
+  }
+  if (!Reduction)
+    return false;
+
+  // Check reduction structure: PHI + (A * B)
+  auto *FAdd = cast<BinaryOperator>(Reduction);
+  auto *PHI = dyn_cast<PHINode>(FAdd->getOperand(0));
+  auto *InnerMul = dyn_cast<BinaryOperator>(FAdd->getOperand(1));
+  if (!PHI || !InnerMul) {
+    PHI = dyn_cast<PHINode>(FAdd->getOperand(1));
+    InnerMul = dyn_cast<BinaryOperator>(FAdd->getOperand(0));
+  }
+  if (!PHI || !InnerMul || InnerMul->getOpcode() != Instruction::FMul)
+    return false;
+
+  // Extract loads from A and B
+  auto *Load0 = dyn_cast<LoadInst>(InnerMul->getOperand(0));
+  auto *Load1 = dyn_cast<LoadInst>(InnerMul->getOperand(1));
+  if (!Load0 || !Load1)
+    return false;
+
+  // Extract PHIs using helper (handles TRMM's backward-counting GEP patterns)
+  PHINode *APHI1 = nullptr;
+  PHINode *APHI2 = nullptr;
+  PHINode *BPHI1 = nullptr;
+  PHINode *BPHI2 = nullptr;
+  if (!extractTRMMPHIsFromGEPs(Load0, Load1, Store, APHI1, APHI2, BPHI1, BPHI2,
+                               BasePtrToA, BasePtrToB, LDA, LDB))
+    return false;
+
+  // Set GEP pointers for later use
+  GEPA = cast<GetElementPtrInst>(Load0->getPointerOperand());
+  GEPB = cast<GetElementPtrInst>(Load1->getPointerOperand());
+
+  // Determine layout and assign loop variables
+  if (!matchTRMMLayout(APHI1, APHI2, BPHI1, BPHI2, ALayout, BLayout,
+                       IVarI, IVarJ, IVarK, IncI, IncJ, IncK, LI))
+    return false;
+
+  // Check for triangular loop bound (k compared with mm)
+  PHINode *KPhi = static_cast<PHINode *>(IVarK);
+  PHINode *IPhi = static_cast<PHINode *>(IVarI);
+
+  Loop *KLoop = LI.getLoopFor(KPhi->getParent());
+  if (!KLoop)
+    return false;
+
+  SmallVector<BasicBlock *, 4> LoopExitingBBs;
+  KLoop->getExitingBlocks(LoopExitingBBs);
+
+  bool IsTRMM = false;
+  for (auto *BB : LoopExitingBBs) {
+    auto *Term = BB->getTerminator();
+    if (auto *BR = dyn_cast<BranchInst>(Term)) {
+      if (auto *CMP = dyn_cast<ICmpInst>(BR->getCondition())) {
+        Value *CmpLHS = CMP->getOperand(0);
+        Value *CmpRHS = CMP->getOperand(1);
+
+        bool LHSInvolvesK = (CmpLHS == KPhi);
+        bool RHSInvolvesK = (CmpRHS == KPhi);
+        bool LHSInvolvesI = (CmpLHS == IPhi);
+        bool RHSInvolvesI = (CmpRHS == IPhi);
+
+        // Check for (k+1) or (k-1) patterns
+        if (auto *Add = dyn_cast<BinaryOperator>(CmpLHS)) {
+          if (Add->getOpcode() == Instruction::Add) {
+            if (Add->getOperand(0) == KPhi || Add->getOperand(1) == KPhi)
+              LHSInvolvesK = true;
+          }
+        }
+
+        // Check for (mm-1) or (mm+1) patterns
+        if (auto *Add = dyn_cast<BinaryOperator>(CmpRHS)) {
+          if (Add->getOpcode() == Instruction::Add) {
+            if (Add->getOperand(0) == IPhi || Add->getOperand(1) == IPhi)
+              RHSInvolvesI = true;
+          }
+        }
+
+        // Triangular bound: k compared with mm
+        if ((LHSInvolvesK && RHSInvolvesI) || (LHSInvolvesI && RHSInvolvesK)) {
+          IsTRMM = true;
+          IsLower = true;
+          break;
+        }
+      }
+    }
+  }
+  return IsTRMM;
 }
 
 static bool matchSYR2K(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
@@ -1051,6 +1342,7 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
         CBLAS_ORDER BLayout;
         CBLAS_ORDER CLayout;
         bool IsCReduced = false;
+        bool IsLower = false;
         SmallSetVector<const llvm::Value *, 2> Stores;
 
         Kernel::KernelType KT = Kernel::KernelType::UNKNOWN_KERNEL;
@@ -1073,6 +1365,49 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
                    matchLoopUpperBound(LI, static_cast<PHINode *>(IVarJ), N) &&
                    matchLoopUpperBound(LI, static_cast<PHINode *>(IVarK), K)) {
           KT = Kernel::KernelType::GEMM_KERNEL;
+        } else if (matchTRMM(*Inst, IVarI, IVarJ, IVarK, GEPA, BasePtrToA, GEPB,
+                     BasePtrToB, LDA, LDB, ALayout, BLayout, LI, Alpha,
+                     IncI, IncJ, IncK, IsLower)) {
+  // For TRMM, nn loop (IVarJ) should give us N normally
+  if (!matchLoopUpperBound(LI, static_cast<PHINode *>(IVarJ), N))
+    continue;
+  
+  // For backward-counting mm loop, we need to extract M differently
+  // The mm PHI looks like: phi [m-1, preheader] [mm-1, latch]
+  // So we need to find the initial value and add 1
+  PHINode *mmPHI = static_cast<PHINode *>(IVarI);
+  
+  // Get the initial value from the PHI (the value from outside the loop)
+  Loop *mmLoop = LI.getLoopFor(mmPHI->getParent());
+  BasicBlock *Preheader = mmLoop->getLoopPreheader();
+
+  if (!Preheader)
+    continue;
+  
+ Value *InitialValue = mmPHI->getIncomingValueForBlock(Preheader);
+
+
+// Initial value could be M directly, or (M - 1), or a cast of M
+// Try to unwrap casts first
+M = InitialValue;
+
+// If it's a cast (zext, sext, trunc), unwrap it
+if (auto *Cast = dyn_cast<CastInst>(InitialValue)) {
+  M = Cast->getOperand(0);
+} else if (auto *BinOp = dyn_cast<BinaryOperator>(InitialValue)) {
+  // If it's (M - 1) or (M + (-1))
+  if (BinOp->getOpcode() == Instruction::Add || BinOp->getOpcode() == Instruction::Sub) {
+    M = BinOp->getOperand(0);
+  }
+} else {
+  errs() << "DEBUG: Using initial value directly as M\n";
+}
+
+if (!M) {
+  continue;
+}
+  
+  KT = Kernel::KernelType::TRMM_KERNEL;
         } else
           continue;
 
@@ -1103,9 +1438,16 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
         Value *MatchedLDC = LDC;
 
         Stores.insert(&*Inst);
-        collectOtherKernelStoresToC(GEPC, BasePtrToC, MatchedLDC, IVarI, IVarJ,
-                                    Alpha, Beta, OuterLoop, *Inst, DT, Stores,
-                                    IsCReduced);
+        
+        if (KT == Kernel::KernelType::TRMM_KERNEL) {
+          collectOtherKernelStoresToC(GEPB, BasePtrToB, LDB, IVarI, IVarJ,
+                                      Alpha, Beta, OuterLoop, *Inst, DT, Stores,
+                                      IsCReduced);
+        } else {
+          collectOtherKernelStoresToC(GEPC, BasePtrToC, MatchedLDC, IVarI, IVarJ,
+                                      Alpha, Beta, OuterLoop, *Inst, DT, Stores,
+                                      IsCReduced);
+        }
 
         bool IsADoublePtr = false;
         bool IsBDoublePtr = false;
@@ -1116,13 +1458,13 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
         assert(GEPB && "No GetElementPtrInst match for matrix B!");
         Type *BElType = getMatrixElementType(GEPB, IsBDoublePtr);
         assert(BElType && "Could not determine matrix B element type!");
-        assert(GEPC && "No GetElementPtrInst match for matrix C!");
-        Type *CElType = getCMatrixElementType(static_cast<StoreInst *>(&*Inst),
-                                              IsCDoublePtr);
-        assert(CElType && "Could not determine matrix C element type!");
+        
         if (KT == Kernel::KernelType::SYR2K_KERNEL) {
-          // Note that LD* is determined first by the overall storage order
-          // then whether or not the matrix has been transposed.
+          assert(GEPC && "No GetElementPtrInst match for matrix C!");
+          Type *CElType = getCMatrixElementType(static_cast<StoreInst *>(&*Inst),
+                                                IsCDoublePtr);
+          assert(CElType && "Could not determine matrix C element type!");
+          
           if (LDA == nullptr)
             LDA = ALayout == KernelFaRer::RowMajor ? K : N;
 
@@ -1144,9 +1486,32 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
           ListOfKernels->push_back(
               std::make_unique<SYR2K>(*OuterLoop, *Inst, MatrixA, MatrixB,
                                       MatrixC, Stores, Alpha, Beta, IncI, IncJ, IncK));
+        } else if (KT == Kernel::KernelType::TRMM_KERNEL) {
+          if (LDA == nullptr)
+            LDA = ALayout == KernelFaRer::RowMajor ? M : M;
+          else
+            setLeadingDimensionValue(F.getEntryBlock(), *OuterLoop, IVarI,
+                                     IVarK, LDA);
+
+          if (LDB == nullptr)
+            LDB = BLayout == KernelFaRer::RowMajor ? N : M;
+          else
+            setLeadingDimensionValue(F.getEntryBlock(), *OuterLoop, IVarI,
+                                     IVarJ, LDB);
+
+          Matrix MatrixA(*AElType, *BasePtrToA, ALayout, IsADoublePtr, *LDA, *M,
+                         *M, *IVarI, *IVarK);
+          Matrix MatrixB(*BElType, *BasePtrToB, BLayout, IsBDoublePtr, *LDB, *M,
+                         *N, *IVarI, *IVarJ);
+          ListOfKernels->push_back(
+              std::make_unique<TRMM>(*OuterLoop, *Inst, MatrixA, MatrixB,
+                                     Stores, Alpha, IsLower, IncI, IncJ, IncK));
         } else {
-          // Note that LD* is determined first by the overall storage order
-          // then whether or not the matrix has been transposed.
+          assert(GEPC && "No GetElementPtrInst match for matrix C!");
+          Type *CElType = getCMatrixElementType(static_cast<StoreInst *>(&*Inst),
+                                                IsCDoublePtr);
+          assert(CElType && "Could not determine matrix C element type!");
+          
           if (LDA == nullptr) {
             if (CLayout == KernelFaRer::RowMajor)
               LDA = ALayout == CLayout ? K : M;
