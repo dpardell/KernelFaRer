@@ -869,8 +869,8 @@ static bool matchSyr2kIndVarAndLayout(Value *const &PtrToA, Value *&PtrToA2,
 }
 
 
-// Helper function to extract PHI nodes from TRMM's backward-counting GEP patterns.
-// TRMM has nested GEPs with backward iteration: GEP(GEP(base, mm-1), k*lda)
+// Helper function to extract PHI nodes from TRMM's GEP patterns.
+// Handles both lower (backward, mm-1) and upper (forward, mm) triangular cases.
 // Returns true if extraction succeeds, false otherwise.
 static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
                                     StoreInst *Store, PHINode *&APHI1,
@@ -878,7 +878,7 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
                                     PHINode *&BPHI2, Value *&BasePtrToA,
                                     Value *&BasePtrToB, Value *&LDA,
                                     Value *&LDB) {
-  // Extract from Load0 (matrix A): GEP(GEP(base, mm-1), k*lda)
+  // Extract from Load0 (matrix A)
   auto *Load0GEP = dyn_cast<GetElementPtrInst>(Load0->getPointerOperand());
   if (!Load0GEP)
     return false;
@@ -888,14 +888,16 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
     return false;
 
   BasePtrToA = Load0BaseGEP->getPointerOperand();
-  Value *Load0BaseIdx = Load0BaseGEP->getOperand(1);  // mm-1
+  Value *Load0BaseIdx = Load0BaseGEP->getOperand(1);  // mm-1 or mm
   Value *Load0OuterIdx = Load0GEP->getOperand(1);     // k*lda
 
-  // Extract mm PHI from (mm-1) - could be Add with -1 constant
-  if (auto *Add = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
+  // Extract mm PHI: could be direct (upper) or (mm-1) pattern (lower)
+  if (auto *P = dyn_cast<PHINode>(Load0BaseIdx)) {
+    APHI1 = P;  // Upper triangular (direct PHI)
+  } else if (auto *Add = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
     if (Add->getOpcode() == Instruction::Add) {
       if (auto *P = dyn_cast<PHINode>(Add->getOperand(0)))
-        APHI1 = P;
+        APHI1 = P;  // Lower triangular (mm-1 pattern)
       else if (auto *P = dyn_cast<PHINode>(Add->getOperand(1)))
         APHI1 = P;
     }
@@ -917,7 +919,7 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
   if (!APHI1 || !APHI2)
     return false;
 
-  // Extract from Load1 (matrix B): GEP(GEP(base, nn*ldb), k)
+  // Extract from Load1 (matrix B)
   auto *Load1GEP = dyn_cast<GetElementPtrInst>(Load1->getPointerOperand());
   if (!Load1GEP)
     return false;
@@ -1059,7 +1061,7 @@ static bool matchTRMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
   if (!Reduction)
     return false;
 
-  // Check reduction structure: PHI + (A * B)
+  // Check reduction structure (PHI + (A * B))
   auto *FAdd = cast<BinaryOperator>(Reduction);
   auto *PHI = dyn_cast<PHINode>(FAdd->getOperand(0));
   auto *InnerMul = dyn_cast<BinaryOperator>(FAdd->getOperand(1));
@@ -1076,7 +1078,7 @@ static bool matchTRMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
   if (!Load0 || !Load1)
     return false;
 
-  // Extract PHIs using helper (handles TRMM's backward-counting GEP patterns)
+  // Extract PHIs using helper (handles both upper and lower triangular patterns)
   PHINode *APHI1 = nullptr;
   PHINode *APHI2 = nullptr;
   PHINode *BPHI1 = nullptr;
@@ -1134,11 +1136,39 @@ static bool matchTRMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
           }
         }
 
-        // Triangular bound: k compared with mm
+        // Triangular bound (k compared with mm)
         if ((LHSInvolvesK && RHSInvolvesI) || (LHSInvolvesI && RHSInvolvesK)) {
           IsTRMM = true;
-          IsLower = true;
+          
+          ICmpInst::Predicate Pred = CMP->getPredicate();
+          
+          if (Pred == ICmpInst::ICMP_SLE || Pred == ICmpInst::ICMP_SLT ||
+              Pred == ICmpInst::ICMP_ULE || Pred == ICmpInst::ICMP_ULT) {
+            IsLower = true;
+          } else if (Pred == ICmpInst::ICMP_SGE || Pred == ICmpInst::ICMP_SGT ||
+                     Pred == ICmpInst::ICMP_UGE || Pred == ICmpInst::ICMP_UGT) {
+            IsLower = false;
+          }
+          
           break;
+        }
+        
+        // Upper triangular (k starts at mm, compared with M)
+        if (LHSInvolvesK || RHSInvolvesK) {
+          Value *KInitVal = nullptr;
+          for (unsigned i = 0; i < KPhi->getNumIncomingValues(); ++i) {
+            BasicBlock *IncomingBB = KPhi->getIncomingBlock(i);
+            if (!KLoop->contains(IncomingBB)) {
+              KInitVal = KPhi->getIncomingValue(i);
+              break;
+            }
+          }
+          
+          if (KInitVal == IPhi) {
+            IsTRMM = true;
+            IsLower = false;
+            break;
+          }
         }
       }
     }
@@ -1366,48 +1396,45 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
                    matchLoopUpperBound(LI, static_cast<PHINode *>(IVarK), K)) {
           KT = Kernel::KernelType::GEMM_KERNEL;
         } else if (matchTRMM(*Inst, IVarI, IVarJ, IVarK, GEPA, BasePtrToA, GEPB,
-                     BasePtrToB, LDA, LDB, ALayout, BLayout, LI, Alpha,
-                     IncI, IncJ, IncK, IsLower)) {
-  // For TRMM, nn loop (IVarJ) should give us N normally
-  if (!matchLoopUpperBound(LI, static_cast<PHINode *>(IVarJ), N))
-    continue;
-  
-  // For backward-counting mm loop, we need to extract M differently
-  // The mm PHI looks like: phi [m-1, preheader] [mm-1, latch]
-  // So we need to find the initial value and add 1
-  PHINode *mmPHI = static_cast<PHINode *>(IVarI);
-  
-  // Get the initial value from the PHI (the value from outside the loop)
-  Loop *mmLoop = LI.getLoopFor(mmPHI->getParent());
-  BasicBlock *Preheader = mmLoop->getLoopPreheader();
-
-  if (!Preheader)
-    continue;
-  
- Value *InitialValue = mmPHI->getIncomingValueForBlock(Preheader);
-
-
-// Initial value could be M directly, or (M - 1), or a cast of M
-// Try to unwrap casts first
-M = InitialValue;
-
-// If it's a cast (zext, sext, trunc), unwrap it
-if (auto *Cast = dyn_cast<CastInst>(InitialValue)) {
-  M = Cast->getOperand(0);
-} else if (auto *BinOp = dyn_cast<BinaryOperator>(InitialValue)) {
-  // If it's (M - 1) or (M + (-1))
-  if (BinOp->getOpcode() == Instruction::Add || BinOp->getOpcode() == Instruction::Sub) {
-    M = BinOp->getOperand(0);
-  }
-} else {
-  errs() << "DEBUG: Using initial value directly as M\n";
-}
-
-if (!M) {
-  continue;
-}
-  
-  KT = Kernel::KernelType::TRMM_KERNEL;
+                   BasePtrToB, LDA, LDB, ALayout, BLayout, LI, Alpha,
+                   IncI, IncJ, IncK, IsLower)) {
+          // For TRMM, nn loop (IVarJ) should give us N normally
+          if (!matchLoopUpperBound(LI, static_cast<PHINode *>(IVarJ), N))
+            continue;
+          
+          PHINode *mmPHI = static_cast<PHINode *>(IVarI);
+          
+          if (IsLower) {
+            // Lower triangular (backward-counting mm loop)
+            Loop *mmLoop = LI.getLoopFor(mmPHI->getParent());
+            BasicBlock *Preheader = mmLoop->getLoopPreheader();
+            
+            if (!Preheader)
+              continue;
+            
+            Value *InitialValue = mmPHI->getIncomingValueForBlock(Preheader);
+            M = InitialValue;
+            
+            // If it's a cast (zext, sext, trunc), unwrap it
+            if (auto *Cast = dyn_cast<CastInst>(InitialValue)) {
+              M = Cast->getOperand(0);
+            } else if (auto *BinOp = dyn_cast<BinaryOperator>(InitialValue)) {
+              // If it's (M - 1) or (M + (-1))
+              if (BinOp->getOpcode() == Instruction::Add || 
+                  BinOp->getOpcode() == Instruction::Sub) {
+                M = BinOp->getOperand(0);
+              }
+            }
+          } else {
+            // Upper triangular (forward-counting mm loop)
+            if (!matchLoopUpperBound(LI, mmPHI, M))
+              continue;
+          }
+          
+          if (!M)
+            continue;
+          
+          KT = Kernel::KernelType::TRMM_KERNEL;
         } else
           continue;
 

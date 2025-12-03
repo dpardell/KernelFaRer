@@ -1,4 +1,4 @@
-void basicStrmm(int m, int n, float alpha, const float *A, int lda, float *B, int ldb)
+void basicStrmmLower(int m, int n, float alpha, const float *A, int lda, float *B, int ldb)
 {
   for (int nn = 0; nn < n; ++nn) {
     for (int mm = m - 1; mm >= 0; --mm) {
