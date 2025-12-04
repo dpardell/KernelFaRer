@@ -13,6 +13,28 @@
 
 namespace kfcompare {
 
+inline TestConfig parse_args(int argc, char** argv) {
+    TestConfig cfg;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            const char* size_str = argv[++i];
+            // Try MxNxK format first
+            int m, n, k;
+            if (std::sscanf(size_str, "%dx%dx%d", &m, &n, &k) == 3) {
+                cfg.M = m; cfg.N = n; cfg.K = k;
+            } else if (std::sscanf(size_str, "%d", &m) == 1) {
+                // Single number: square matrices
+                cfg.M = cfg.N = cfg.K = m;
+            }
+        } else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
+            cfg.stress_iters = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--bench") == 0) {
+            cfg.bench = true;
+        }
+    }
+    return cfg;
+}
+
 template<typename T>
 Matrix<T>::Matrix(size_t rows, size_t cols) : rows_(rows), cols_(cols) {
     data_ = static_cast<T*>(std::malloc(sizeof(T) * rows * cols));
@@ -102,7 +124,8 @@ int run_test(const char* name,
              std::function<void()> kfarer,
              std::function<void()> reset,
              const T* output, size_t output_size,
-             double tolerance) {
+             double tolerance,
+             bool bench) {
     // Run baseline and save result
     reset();
     baseline();
@@ -113,18 +136,50 @@ int run_test(const char* name,
     kfarer();
     double max_diff = compare(baseline_result.data(), output, output_size);
     
-    // Time both
-    reset();
-    double time_base = time_kernel(baseline);
-    reset();
-    double time_kf = time_kernel(kfarer);
-    
-    // Print results
     const char* status = (max_diff <= tolerance) ? "PASS" : "FAIL";
     std::printf("=== %s ===\n", name);
     std::printf("[%s] max_diff=%.2e (tol=%.2e)\n", status, max_diff, tolerance);
-    std::printf("  baseline: %.3f ms\n", time_base);
-    std::printf("  kfarer:   %.3f ms (%.2fx)\n", time_kf, time_base / time_kf);
+    
+    if (bench) {
+        // Benchmark mode: 5 runs, show all times, average middle 3
+        reset();
+        BenchResult base = benchmark_kernel(baseline);
+        reset();
+        BenchResult kf = benchmark_kernel(kfarer);
+        
+        double speedup = base.avg_mid3 / kf.avg_mid3;
+        
+        // Compute min/max speedup from individual middle-3 runs for confidence interval
+        double min_speedup = base.times[1] / kf.times[3];  // slowest base / fastest kf
+        double max_speedup = base.times[3] / kf.times[1];  // fastest base / slowest kf
+        
+        std::printf("\n  BENCHMARK (5 runs, avg of middle 3):\n");
+        std::printf("  %-10s", "baseline:");
+        for (int i = 0; i < 5; ++i) {
+            if (i == 0 || i == 4) std::printf(" [%6.2f]", base.times[i]);  // dropped
+            else std::printf("  %6.2f ", base.times[i]);
+        }
+        std::printf(" => %7.3f ms\n", base.avg_mid3);
+        
+        std::printf("  %-10s", "kfarer:");
+        for (int i = 0; i < 5; ++i) {
+            if (i == 0 || i == 4) std::printf(" [%6.2f]", kf.times[i]);  // dropped
+            else std::printf("  %6.2f ", kf.times[i]);
+        }
+        std::printf(" => %7.3f ms\n", kf.avg_mid3);
+        
+        std::printf("\n  SPEEDUP: %.3f ms / %.3f ms = %.2fx", base.avg_mid3, kf.avg_mid3, speedup);
+        std::printf("  (range: %.2fx - %.2fx)\n", min_speedup, max_speedup);
+    } else {
+        // Quick mode: median timing
+        reset();
+        double time_base = time_kernel(baseline);
+        reset();
+        double time_kf = time_kernel(kfarer);
+        
+        std::printf("  baseline: %.3f ms\n", time_base);
+        std::printf("  kfarer:   %.3f ms (%.2fx)\n", time_kf, time_base / time_kf);
+    }
     
     return (max_diff <= tolerance) ? 0 : 1;
 }
@@ -179,7 +234,7 @@ int stress_test(const char* name,
 }
 
 template<typename T>
-int run(int argc, char** argv,
+int run(const TestConfig& cfg,
         const char* name,
         std::function<void()> baseline,
         std::function<void()> kfarer,
@@ -187,22 +242,18 @@ int run(int argc, char** argv,
         std::function<void(unsigned)> randomize,
         const T* output, size_t output_size,
         double tolerance) {
-    // Parse --stress N
-    int stress_iters = 0;
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
-            stress_iters = std::atoi(argv[++i]);
-        }
-    }
+    // Build name with size info
+    char full_name[256];
+    std::snprintf(full_name, sizeof(full_name), "%s [%dx%dx%d]", name, cfg.M, cfg.N, cfg.K);
     
-    if (stress_iters > 0) {
-        return stress_test<T>(name, baseline, kfarer, reset, randomize,
-                              output, output_size, tolerance, stress_iters);
+    if (cfg.stress_iters > 0) {
+        return stress_test<T>(full_name, baseline, kfarer, reset, randomize,
+                              output, output_size, tolerance, cfg.stress_iters);
     } else {
         // Initialize with default seed
         randomize(42);
-        return run_test<T>(name, baseline, kfarer, reset,
-                           output, output_size, tolerance);
+        return run_test<T>(full_name, baseline, kfarer, reset,
+                           output, output_size, tolerance, cfg.bench);
     }
 }
 

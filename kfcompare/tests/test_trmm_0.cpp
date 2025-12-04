@@ -1,17 +1,19 @@
-// test_trmm_0.cpp - Compare baseline vs KernelFaRer for trmm-0.cc
-// Usage: ./test_trmm_0 [--stress N]
+// test_trmm_0.cpp - Compare baseline vs KernelFaRer for trmm_0.cc
+// Usage: ./test_trmm_0 [--size N | --size MxN] [--stress ITERS]
+// Note: For TRMM, K is ignored; uses M for the triangular matrix dimension
 #include "KFCompare.h"
 
-void basicStrmmLower_baseline(int m, int n, float alpha, const float *A, int lda, float *B, int ldb);
-void basicStrmmLower_kfarer(int m, int n, float alpha, const float *A, int lda, float *B, int ldb);
+extern "C" void basicStrmmLower_baseline(int m, int n, float alpha, const float *A, int lda, float *B, int ldb);
+extern "C" void basicStrmmLower_kfarer(int m, int n, float alpha, const float *A, int lda, float *B, int ldb);
 
 int main(int argc, char** argv) {
-    const int M = 256, N = 256;
+    auto cfg = kfcompare::parse_args(argc, argv);
+    const int M = cfg.M, N = cfg.N;
     const float alpha = 1.0f;
     
     kfcompare::Matrix<float> A(M, M), B(M, N), B_init(M, N);
     
-    return kfcompare::run<float>(argc, argv, "trmm-0 (basicStrmmLower)",
+    return kfcompare::run<float>(cfg, "trmm_0 (basicStrmmLower)",
         [&]{ basicStrmmLower_baseline(M, N, alpha, A.data(), M, B.data(), M); },
         [&]{ basicStrmmLower_kfarer(M, N, alpha, A.data(), M, B.data(), M); },
         [&]{ B.copy_from(B_init); },
