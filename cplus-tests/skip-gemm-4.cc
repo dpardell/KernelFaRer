@@ -11,12 +11,12 @@ void striped_gemm(double *A, double *B, double *C,
         for (int p = 0; p < k; p+=p_blk) {
             for (int i = 0; i < m; i+=i_blk) {
                 const int jj_end = ((j + j_blk) < n) ? (j + j_blk) : n;
-                for (long jj = j; jj < jj_end; jj++ ) {
+                for (long jj = j; jj < jj_end; jj+=2) {
                     const int pp_end = ((p + p_blk) < k) ? (p + p_blk) : k;
                     for (long pp = p; pp < pp_end; pp++) {
                         const int ii_end = ((i + i_blk) < m) ? (i + i_blk) : m;
                         for (long ii = i; ii < ii_end; ii++) {
-                            C[ jj * m + ii] += A[ pp * m + ii] * B[ jj * k + pp];
+                            C[jj * ldc + ii] += A[ pp * lda + ii] * B[ jj * ldb + pp];
                         }
                     }
                 }
