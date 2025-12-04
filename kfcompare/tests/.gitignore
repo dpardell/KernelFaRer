@@ -1,0 +1,4 @@
+*.o
+test_*
+test_*
+!test_*.cpp
