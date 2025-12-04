@@ -1,8 +1,8 @@
 // test_skip_gemm_3.cpp - Compare baseline vs KernelFaRer for skip-gemm-3.cc
 #include "KFCompare.h"
 
-extern "C" void striped_gemm_baseline(double *A, double *B, double *C, int M, int N, int K, int lda, int ldb, int ldc);
-extern "C" void striped_gemm_kfarer(double *A, double *B, double *C, int M, int N, int K, int lda, int ldb, int ldc);
+void striped_gemm_baseline(double *A, double *B, double *C, int M, int N, int K, int lda, int ldb, int ldc);
+void striped_gemm_kfarer(double *A, double *B, double *C, int M, int N, int K, int lda, int ldb, int ldc);
 
 int main(int argc, char** argv) {
     const int M = 256, N = 256, K = 256;

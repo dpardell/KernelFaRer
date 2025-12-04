@@ -2,9 +2,9 @@
 // Usage: ./test_skip_gemm_0 [--stress N]
 #include "KFCompare.h"
 
-extern "C" void striped_gemm_baseline(double *A, double *B, double *C,
+void striped_gemm_baseline(double *A, double *B, double *C,
     int M, int N, int K, int lda, int ldb, int ldc);
-extern "C" void striped_gemm_kfarer(double *A, double *B, double *C,
+void striped_gemm_kfarer(double *A, double *B, double *C,
     int M, int N, int K, int lda, int ldb, int ldc);
 
 int main(int argc, char** argv) {

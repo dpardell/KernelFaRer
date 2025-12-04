@@ -2,9 +2,9 @@
 // Usage: ./test_gemm_0 [--stress N]
 #include "KFCompare.h"
 
-extern "C" void basicSgemm_baseline(int m, int n, int k, float alpha,
+void basicSgemm_baseline(int m, int n, int k, float alpha,
     const float *A, int lda, const float *B, int ldb, float beta, float *C, int ldc);
-extern "C" void basicSgemm_kfarer(int m, int n, int k, float alpha,
+void basicSgemm_kfarer(int m, int n, int k, float alpha,
     const float *A, int lda, const float *B, int ldb, float beta, float *C, int ldc);
 
 int main(int argc, char** argv) {

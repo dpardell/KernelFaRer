@@ -1,11 +1,11 @@
 // test_sm_gemm_2.cpp - Compare baseline vs KernelFaRer for sm-gemm-2.cc
 #include "KFCompare.h"
 
-extern "C" void submatrix_gemm_baseline(int m, int n, int k, float alpha,
+void submatrix_gemm_baseline(int m, int n, int k, float alpha,
     const float *A, int lda, int row_A, int col_A,
     const float *B, int ldb, int row_B, int col_B,
     float beta, float *C, int ldc, int row_C, int col_C);
-extern "C" void submatrix_gemm_kfarer(int m, int n, int k, float alpha,
+void submatrix_gemm_kfarer(int m, int n, int k, float alpha,
     const float *A, int lda, int row_A, int col_A,
     const float *B, int ldb, int row_B, int col_B,
     float beta, float *C, int ldc, int row_C, int col_C);

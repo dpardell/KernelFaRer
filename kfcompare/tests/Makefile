@@ -7,8 +7,6 @@ CXX ?= clang++
 # LLVM compiler for kernels (needs KernelFaRer plugin)
 LLVM_CXX ?= clang++
 
-OBJCOPY ?= llvm-objcopy
-
 # Paths
 KFCOMPARE_INC = ../include
 KFCOMPARE_SRC = ../src
@@ -30,59 +28,48 @@ KFARER_FLAGS = -fplugin=$(PLUGIN) -fpass-plugin=$(PLUGIN) \
 LDFLAGS_BLAS ?= -lopenblas
 
 # ============================================================================
-# Test definitions: (name, kernel_source, grep_pattern, func_name)
+# Test definitions: (name, kernel_source, func_name)
 # ============================================================================
 TESTS = test_gemm_0 test_skip_gemm_0 test_skip_gemm_1 test_skip_gemm_2 \
         test_skip_gemm_3 test_skip_gemm_4 test_skip_gemm_5 \
         test_sm_gemm_0 test_sm_gemm_1 test_sm_gemm_2 test_trmm_0
 
 # test_gemm_0
-test_gemm_0_SRC    = gemm-0.cc
-test_gemm_0_GREP   = sgemm
-test_gemm_0_FUNC   = basicSgemm
+test_gemm_0_SRC  = gemm-0.cc
+test_gemm_0_FUNC = basicSgemm
 
 # test_skip_gemm_0 through test_skip_gemm_5
-test_skip_gemm_0_SRC    = skip-gemm-0.cc
-test_skip_gemm_0_GREP   = striped_gemm
-test_skip_gemm_0_FUNC   = striped_gemm
+test_skip_gemm_0_SRC  = skip-gemm-0.cc
+test_skip_gemm_0_FUNC = striped_gemm
 
-test_skip_gemm_1_SRC    = skip-gemm-1.cc
-test_skip_gemm_1_GREP   = striped_gemm
-test_skip_gemm_1_FUNC   = striped_gemm
+test_skip_gemm_1_SRC  = skip-gemm-1.cc
+test_skip_gemm_1_FUNC = striped_gemm
 
-test_skip_gemm_2_SRC    = skip-gemm-2.cc
-test_skip_gemm_2_GREP   = striped_gemm
-test_skip_gemm_2_FUNC   = striped_gemm
+test_skip_gemm_2_SRC  = skip-gemm-2.cc
+test_skip_gemm_2_FUNC = striped_gemm
 
-test_skip_gemm_3_SRC    = skip-gemm-3.cc
-test_skip_gemm_3_GREP   = striped_gemm
-test_skip_gemm_3_FUNC   = striped_gemm
+test_skip_gemm_3_SRC  = skip-gemm-3.cc
+test_skip_gemm_3_FUNC = striped_gemm
 
-test_skip_gemm_4_SRC    = skip-gemm-4.cc
-test_skip_gemm_4_GREP   = striped_gemm
-test_skip_gemm_4_FUNC   = striped_gemm
+test_skip_gemm_4_SRC  = skip-gemm-4.cc
+test_skip_gemm_4_FUNC = striped_gemm
 
-test_skip_gemm_5_SRC    = skip-gemm-5.cc
-test_skip_gemm_5_GREP   = striped_gemm
-test_skip_gemm_5_FUNC   = striped_gemm
+test_skip_gemm_5_SRC  = skip-gemm-5.cc
+test_skip_gemm_5_FUNC = striped_gemm
 
 # test_sm_gemm_0 through test_sm_gemm_2
-test_sm_gemm_0_SRC    = sm-gemm-0.cc
-test_sm_gemm_0_GREP   = submatrix_gemm
-test_sm_gemm_0_FUNC   = submatrix_gemm
+test_sm_gemm_0_SRC  = sm-gemm-0.cc
+test_sm_gemm_0_FUNC = submatrix_gemm
 
-test_sm_gemm_1_SRC    = sm-gemm-1.cc
-test_sm_gemm_1_GREP   = submatrix_gemm
-test_sm_gemm_1_FUNC   = submatrix_gemm
+test_sm_gemm_1_SRC  = sm-gemm-1.cc
+test_sm_gemm_1_FUNC = submatrix_gemm
 
-test_sm_gemm_2_SRC    = sm-gemm-2.cc
-test_sm_gemm_2_GREP   = submatrix_gemm
-test_sm_gemm_2_FUNC   = submatrix_gemm
+test_sm_gemm_2_SRC  = sm-gemm-2.cc
+test_sm_gemm_2_FUNC = submatrix_gemm
 
 # test_trmm_0
-test_trmm_0_SRC    = trmm-0.cc
-test_trmm_0_GREP   = strmm
-test_trmm_0_FUNC   = basicStrmm
+test_trmm_0_SRC  = trmm-0.cc
+test_trmm_0_FUNC = basicStrmmLower
 
 # ============================================================================
 # Generic infrastructure
@@ -104,22 +91,20 @@ check-plugin:
 		(echo "ERROR: Plugin failed to load. Rebuild KernelFaRer with your LLVM clang version." && exit 1)
 	@echo "Plugin OK!"
 
-# Macro: compile kernel and rename symbol
-# $(1)=output.o, $(2)=source, $(3)=grep pattern, $(4)=new func name, $(5)=extra flags
+# Macro: compile kernel with renamed symbol via preprocessor
+# $(1)=output.o, $(2)=source, $(3)=original func name, $(4)=new func name, $(5)=extra flags
 define compile_kernel
-	$(LLVM_CXX) $(KERNEL_FLAGS) $(5) -c $(2) -o $(1)
-	SYM=$$(nm $(1) | grep -i '$(3)' | grep ' T ' | awk '{print $$3}') && \
-	$(OBJCOPY) --redefine-sym $$SYM=_$(4) $(1)
+	$(LLVM_CXX) $(KERNEL_FLAGS) $(5) -D$(3)=$(4) -c $(2) -o $(1)
 endef
 
 # Macro: generate rules for a test
 # $(1)=test name (e.g., test_gemm_0)
 define make_test_rules
 $(1)_baseline.o: $$(KERNEL_DIR)/$$($(1)_SRC)
-	$$(call compile_kernel,$$@,$$<,$$($(1)_GREP),$$($(1)_FUNC)_baseline,)
+	$$(call compile_kernel,$$@,$$<,$$($(1)_FUNC),$$($(1)_FUNC)_baseline,)
 
 $(1)_kfarer.o: $$(KERNEL_DIR)/$$($(1)_SRC) | check-plugin
-	$$(call compile_kernel,$$@,$$<,$$($(1)_GREP),$$($(1)_FUNC)_kfarer,$$(KFARER_FLAGS))
+	$$(call compile_kernel,$$@,$$<,$$($(1)_FUNC),$$($(1)_FUNC)_kfarer,$$(KFARER_FLAGS))
 
 $(1): $(1).cpp $(1)_baseline.o $(1)_kfarer.o kfcompare.o
 	$$(CXX) $$(CXXFLAGS) $$^ -o $$@ $$(LDFLAGS_BLAS)
@@ -156,6 +141,5 @@ help:
 	@echo ""
 	@echo "To add a new test, define:"
 	@echo "  test_xxx_SRC  = kernel-file.cc"
-	@echo "  test_xxx_GREP = symbol_pattern"
 	@echo "  test_xxx_FUNC = function_name"
 	@echo "  TESTS += test_xxx"
