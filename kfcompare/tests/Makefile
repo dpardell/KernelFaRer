@@ -109,7 +109,7 @@ define make_test_rules
 $(1)_baseline.o: $$(KERNEL_DIR)/$$($(1)_SRC)
 	$$(call compile_kernel,$$@,$$<,$$($(1)_FUNC),$$($(1)_FUNC)_baseline,)
 
-$(1)_kfarer.o: $$(KERNEL_DIR)/$$($(1)_SRC) | check-plugin
+$(1)_kfarer.o: $$(KERNEL_DIR)/$$($(1)_SRC)
 	$$(call compile_kernel,$$@,$$<,$$($(1)_FUNC),$$($(1)_FUNC)_kfarer,$$(KFARER_FLAGS))
 
 $(1): $(1).cpp $(1)_baseline.o $(1)_kfarer.o kfcompare.o
