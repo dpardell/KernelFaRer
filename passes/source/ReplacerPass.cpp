@@ -735,12 +735,31 @@ bool runImpl(Function &F, KernelMatcher::Result &GMPR, OptimizationRemarkEmitter
         }
       }
       
-      // Cannot skip both I and J: if incI != 1 then incJ must be 1 (and vice versa)
-      // This check applies to both constant and non-constant increments, since the
-      // dimension adjustment code multiplies LDC by both increments if both are non-1
-      if (!isIncOne(IncI) && !isIncOne(IncJ)) {
-        ORE.emit(ORM << "Cannot skip both rows (I) and columns (J) in GEMM. Cannot replace kernel code.");
-        continue;
+      // Get matrix layouts for validation
+      const Matrix &MA = GEMM->getMatrixA();
+      const Matrix &MB = GEMM->getMatrixB();
+      const Matrix &MC = GEMM->getMatrixC();
+      bool AIsRowMajor = MA.getLayout() == KernelFaRer::RowMajor;
+      bool BIsColMajor = MB.getLayout() == KernelFaRer::ColMajor;
+      bool CIsRowMajor = MC.getLayout() == KernelFaRer::RowMajor;
+      bool CIsColMajor = MC.getLayout() == KernelFaRer::ColMajor;
+      
+      // Validation: Can only skip i if C is row major AND A is row major
+      // This check applies to both constant and non-constant increments
+      if (!isIncOne(IncI)) {
+        if (!(CIsRowMajor && AIsRowMajor)) {
+          ORE.emit(ORM << "Cannot skip elements in I dimension: requires C and A to both be row major. Cannot replace kernel code.");
+          continue;
+        }
+      }
+      
+      // Validation: Can only skip j if C is column major AND B is column major
+      // This check applies to both constant and non-constant increments
+      if (!isIncOne(IncJ)) {
+        if (!(CIsColMajor && BIsColMajor)) {
+          ORE.emit(ORM << "Cannot skip elements in J dimension: requires C and B to both be column major. Cannot replace kernel code.");
+          continue;
+        }
       }
       
       // Validation: Cannot skip in K dimension (reduction dimension)
