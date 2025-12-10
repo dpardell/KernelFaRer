@@ -14,10 +14,10 @@ TestConfig parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
             const char* size_str = argv[++i];
-            // Try MxNxK format first
-            int m, n, k;
-            if (std::sscanf(size_str, "%dx%dx%d", &m, &n, &k) == 3) {
-                cfg.M = m; cfg.N = n; cfg.K = k;
+            // Try MxKxN format first
+            int m, k, n;
+            if (std::sscanf(size_str, "%dx%dx%d", &m, &k, &n) == 3) {
+                cfg.M = m; cfg.K = k; cfg.N = n;
             } else if (std::sscanf(size_str, "%d", &m) == 1) {
                 // Single number: square matrices
                 cfg.M = cfg.N = cfg.K = m;

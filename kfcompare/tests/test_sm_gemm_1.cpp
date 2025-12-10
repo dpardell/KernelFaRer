@@ -1,5 +1,5 @@
 // test_sm_gemm_1.cpp - Compare baseline vs KernelFaRer for sm_gemm_1.cc
-// Usage: ./test_sm_gemm_1 [--size N | --size MxNxK] [--stress ITERS]
+// Usage: ./test_sm_gemm_1 [--size N | --size MxKxN] [--stress ITERS]
 #include "KFCompare.h"
 
 extern "C" void submatrix_gemm_baseline(int m, int n, int k, float alpha,

@@ -1,6 +1,6 @@
 // test_skip_gemm_i64.cpp - Compare baseline vs KernelFaRer for skip_gemm_i64.cc
 // Stride 64 on i dimension
-// Usage: ./test_skip_gemm_i64 [--size N | --size MxNxK] [--stress ITERS]
+// Usage: ./test_skip_gemm_i64 [--size N | --size MxKxN] [--stress ITERS]
 #include "KFCompare.h"
 
 extern "C" void striped_gemm_baseline(float *A, float *B, float *C,

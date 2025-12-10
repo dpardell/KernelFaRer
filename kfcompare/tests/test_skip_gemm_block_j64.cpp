@@ -1,6 +1,6 @@
 // test_skip_gemm_block_j64.cpp - Compare baseline vs KernelFaRer for skip_gemm_block_j64.cc
 // Blocked GEMM with stride on j dimension
-// Usage: ./test_skip_gemm_block_j64 [--size N | --size MxNxK] [--stress ITERS]
+// Usage: ./test_skip_gemm_block_j64 [--size N | --size MxKxN] [--stress ITERS]
 #include "KFCompare.h"
 
 extern "C" void striped_gemm_baseline(float *A, float *B, float *C,

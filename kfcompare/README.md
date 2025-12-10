@@ -74,7 +74,7 @@ Each test executable supports these command-line options:
 | Option | Description | Example |
 |--------|-------------|---------|
 | `--size N` | Set M=N=K=N (square matrices) | `--size 512` |
-| `--size MxNxK` | Set dimensions explicitly | `--size 64x128x256` |
+| `--size MxKxN` | Set dimensions explicitly | `--size 64x128x256` |
 | `--stress ITERS` | Run stress test with random inputs | `--stress 100` |
 | `--bench` | Benchmark mode (5 runs, avg middle 3) | `--bench` |
 

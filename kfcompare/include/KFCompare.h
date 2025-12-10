@@ -17,7 +17,7 @@ struct TestConfig {
 };
 
 // Parse command line arguments for --size and --stress
-// Usage: --size N (sets M=N=K=N) or --size MxNxK
+// Usage: --size N (sets M=K=N) or --size MxKxN
 //        --stress ITERS
 TestConfig parse_args(int argc, char** argv);
 

@@ -1,5 +1,5 @@
 // test_naive_gemm.cpp - Compare baseline vs KernelFaRer for naive_gemm.cc
-// Usage: ./test_naive_gemm [--size N | --size MxNxK] [--stress ITERS]
+// Usage: ./test_naive_gemm [--size N | --size MxKxN] [--stress ITERS]
 #include "KFCompare.h"
 
 extern "C" void basicDgemm_baseline(int m, int n, int k, double alpha,
