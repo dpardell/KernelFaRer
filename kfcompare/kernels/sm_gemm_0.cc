@@ -10,11 +10,11 @@ extern "C" void submatrix_gemm(int m, int n, int k, float alpha,
     for (int nn = 0; nn < n; ++nn) {
       float sum = 0.0f;
       for (int kk = 0; kk < k; ++kk) {
-        float a = A[mm * lda + kk]; 
-        float b = B[kk * ldb + nn];    
+        float a = A[mm * lda + kk]; // row major
+        float b = B[kk * ldb + nn]; // row major
         sum += a * b;
       }
-      C[mm * ldc + nn] = alpha * sum + beta * C[mm * ldc + nn];
+      C[mm * ldc + nn] = alpha * sum + beta * C[mm * ldc + nn]; // row major
     }
   }
 }

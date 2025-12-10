@@ -16,7 +16,9 @@ extern "C" void striped_gemm(float *A, float *B, float *C,
                     for (long pp = p; pp < pp_end; pp++) {
                         const int jj_end = ((j + j_blk) < n) ? (j + j_blk) : n;
                         for (long jj = j; jj < jj_end; jj++) { 
-                            C[ii * ldc + jj] += A[ ii * lda + pp] * B[ pp * ldb + jj];
+                            float a = A[ii * lda + pp]; // row major
+                            float b =  B[pp * ldb + jj]; // row major
+                            C[ii * ldc + jj] += a * b; // row major
                         }
                     }
                 }

@@ -11,7 +11,7 @@ extern "C" void striped_gemm_kfarer(float *A, float *B, float *C,
 int main(int argc, char** argv) {
     auto cfg = kfcompare::parse_args(argc, argv);
     const int M = cfg.M, N = cfg.N, K = cfg.K;
-    const int lda = K, ldb = N, ldc = N;
+    const int lda = M, ldb = K, ldc = M;
     
     kfcompare::Matrix<float> A(M, K), B(K, N), C(M, N);
     

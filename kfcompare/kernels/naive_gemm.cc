@@ -4,11 +4,11 @@ extern "C" void basicDgemm(int m, int n, int k, double alpha, const double *A, i
     for (int nn = 0; nn < n; ++nn) {
       double c = 0.0;
       for (int i = 0; i < k; ++i) {
-        double a = A[mm + i * lda];
-        double b = B[nn + i * ldb];
+        double a = A[mm + i * lda]; // col major
+        double b = B[nn + i * ldb]; // row major
         c += a * b;
       }
-      C[mm+nn*ldc] = C[mm+nn*ldc] * beta + alpha * c;
+      C[mm+nn*ldc] = C[mm+nn*ldc] * beta + alpha * c; // col major
     }
   }
 }
