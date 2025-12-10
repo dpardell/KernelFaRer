@@ -7,6 +7,20 @@
 
 namespace kfcompare {
 
+// Test configuration parsed from command line
+struct TestConfig {
+    int M = 64;
+    int N = 128;
+    int K = 256;
+    int stress_iters = 0;
+    bool bench = false;  // Benchmark mode: 5 runs, average middle 3
+};
+
+// Parse command line arguments for --size and --stress
+// Usage: --size N (sets M=N=K=N) or --size MxNxK
+//        --stress ITERS
+TestConfig parse_args(int argc, char** argv);
+
 // Simple matrix class for test data
 template<typename T>
 class Matrix {
@@ -43,8 +57,17 @@ private:
 template<typename T>
 double compare(const T* a, const T* b, size_t n);
 
-// Time a kernel function, return median time in milliseconds
+// Time a kernel function, returns median of 'runs' executions
 double time_kernel(std::function<void()> func, int runs = 5);
+
+// Benchmark timing result
+struct BenchResult {
+    double times[5];      // All 5 run times (sorted)
+    double avg_mid3;      // Average of middle 3
+};
+
+// Benchmark a kernel: 5 runs, returns all times and average of middle 3
+BenchResult benchmark_kernel(std::function<void()> func);
 
 // Run a comparison test and print results. Returns 0 on pass, 1 on fail.
 // - baseline: function to run as reference
@@ -53,13 +76,15 @@ double time_kernel(std::function<void()> func, int runs = 5);
 // - output: pointer to output buffer to compare
 // - output_size: number of elements in output
 // - tolerance: max allowed difference
+// - bench: if true, use benchmark mode (5 runs, average middle 3)
 template<typename T>
 int run_test(const char* name,
              std::function<void()> baseline,
              std::function<void()> kfarer,
              std::function<void()> reset,
              const T* output, size_t output_size,
-             double tolerance = 1e-6);
+             double tolerance = 1e-6,
+             bool bench = false);
 
 // Stress test: run comparison many times with different random inputs.
 template<typename T>
@@ -72,10 +97,10 @@ int stress_test(const char* name,
                 double tolerance = 1e-6,
                 int iterations = 100);
 
-// Unified entry point: parses argc/argv for --stress N, runs appropriate mode.
+// Unified entry point: runs test or stress test based on config.
 // Call this from main() with all the lambdas.
 template<typename T>
-int run(int argc, char** argv,
+int run(const TestConfig& cfg,
         const char* name,
         std::function<void()> baseline,
         std::function<void()> kfarer,

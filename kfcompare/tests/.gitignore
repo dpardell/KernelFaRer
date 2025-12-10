@@ -2,3 +2,10 @@
 test_*
 test_*
 !test_*.cpp
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
