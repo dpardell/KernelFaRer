@@ -9,8 +9,8 @@ namespace kfcompare {
 
 // Test configuration parsed from command line
 struct TestConfig {
-    int M = 256;
-    int N = 256;
+    int M = 64;
+    int N = 128;
     int K = 256;
     int stress_iters = 0;
     bool bench = false;  // Benchmark mode: 5 runs, average middle 3
