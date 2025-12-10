@@ -197,16 +197,9 @@ function(add_kfcompare_test test_name)
         VERBATIM
     )
     
-    # Create custom targets for object files
-    add_custom_target(${test_name}_baseline_obj
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${test_name}_baseline.o
-    )
-    
-    add_custom_target(${test_name}_kfarer_obj
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${test_name}_kfarer.o
-    )
-    
     # Link test executable
+    # Note: add_custom_command OUTPUT creates implicit dependencies, so CMake
+    # knows to build the .o files before linking
     add_executable(test_${test_name}
         ${test_cpp}
         $<TARGET_OBJECTS:kfcompare_obj>
@@ -217,9 +210,6 @@ function(add_kfcompare_test test_name)
     target_compile_options(test_${test_name} PRIVATE ${CXXFLAGS})
     target_include_directories(test_${test_name} PRIVATE ${KFCOMPARE_INC})
     target_link_libraries(test_${test_name} PRIVATE ${LDFLAGS_BLAS})
-    
-    # Ensure object files are built before linking
-    add_dependencies(test_${test_name} ${test_name}_baseline_obj ${test_name}_kfarer_obj)
     
     # Register test with CTest
     add_test(NAME ${test_name} COMMAND test_${test_name})

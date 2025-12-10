@@ -3,8 +3,33 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 
 namespace kfcompare {
+
+TestConfig parse_args(int argc, char** argv) {
+    TestConfig cfg;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            const char* size_str = argv[++i];
+            // Try MxNxK format first
+            int m, n, k;
+            if (std::sscanf(size_str, "%dx%dx%d", &m, &n, &k) == 3) {
+                cfg.M = m; cfg.N = n; cfg.K = k;
+            } else if (std::sscanf(size_str, "%d", &m) == 1) {
+                // Single number: square matrices
+                cfg.M = cfg.N = cfg.K = m;
+            }
+        } else if (std::strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
+            cfg.stress_iters = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--bench") == 0) {
+            cfg.bench = true;
+        }
+    }
+    return cfg;
+}
 
 double time_kernel(std::function<void()> func, int runs) {
     std::vector<double> times;
