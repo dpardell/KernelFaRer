@@ -180,92 +180,74 @@ Value *getIncOrOne(IRBuilder<> &IR, Value *Inc, bool &Downcast) {
   return prepBLASInt32(IR, Inc, Downcast);
 }
 
+/// A helper function that computes a pointer to a submatrix by applying row and column offsets.
+/// Unwraps any GEP instructions in the base pointer and preserves their offsets.
+///
+/// \param IR the IRBuilder to use
+/// \param Base the base pointer (may contain GEP instructions)
+/// \param RowOff the row offset value or nullptr
+/// \param ColOff the column offset value or nullptr
+/// \param LD the leading dimension value
+/// \param ElementTy the element type for GEP instruction
+/// \param Downcast reference to bool that tracks if downcast occurred
+///
+/// \returns a pointer to the submatrix with all offsets applied
 Value *computeSubmatrixPtr(IRBuilder<> &IR, Value *Base, Value *RowOff, 
                            Value *ColOff, Value *LD, Type *ElementTy, 
                            bool &Downcast) {
-  errs() << "\n=== computeSubmatrixPtr DEBUG ===\n";
-  errs() << "  Base (input): " << *Base << "\n";
-  if (RowOff) errs() << "  RowOff: " << *RowOff << "\n";
-  else errs() << "  RowOff: nullptr\n";
-  if (ColOff) errs() << "  ColOff: " << *ColOff << "\n";
-  else errs() << "  ColOff: nullptr\n";
-  
-  // Unwrap any GEPs to get the true base pointer AND accumulate their offsets
+  // Unwrap any GEPs to get the true base pointer AND accumulate their offsets.
   Value *TrueBase = Base;
   Value *AccumulatedOffset = nullptr;
   
   while (auto *GEP = dyn_cast<GetElementPtrInst>(TrueBase)) {
-    errs() << "  Unwrapping GEP: " << *GEP << "\n";
-    
-    // Get the index from this GEP (last operand)
+    // Get the index from this GEP (last operand).
     if (GEP->getNumOperands() >= 2) {
       Value *GEPIdx = GEP->getOperand(GEP->getNumOperands() - 1);
-      errs() << "    GEP index: " << *GEPIdx << "\n";
       
-      // Accumulate this offset
+      // Accumulate this offset.
       if (AccumulatedOffset) {
         AccumulatedOffset = IR.CreateAdd(AccumulatedOffset, GEPIdx, "accumulated_off");
       } else {
         AccumulatedOffset = GEPIdx;
       }
-      errs() << "    Accumulated offset so far: " << *AccumulatedOffset << "\n";
     }
     
-    // Move to the pointer operand
+    // Move to the pointer operand.
     TrueBase = GEP->getPointerOperand();
-    errs() << "    Unwrapped to base: " << *TrueBase << "\n";
   }
   
-  errs() << "  Final TrueBase: " << *TrueBase << "\n";
-  if (AccumulatedOffset) {
-    errs() << "  AccumulatedOffset from unwrapped GEPs: " << *AccumulatedOffset << "\n";
-  } else {
-    errs() << "  AccumulatedOffset: nullptr\n";
-  }
-  
-  // If no offsets at all, return the true base
-  if (!RowOff && !ColOff && !AccumulatedOffset) {
-    errs() << "  No offsets, returning TrueBase as-is\n";
-    errs() << "=== END computeSubmatrixPtr ===\n\n";
+  // If no offsets at all, return the true base.
+  if (!RowOff && !ColOff && !AccumulatedOffset)
     return TrueBase;
-  }
   
   Value *Offset = nullptr;
   
-  // Compute row_offset * ld
+  // Compute row_offset * ld.
   if (RowOff && LD) {
     Value *RowOffI32 = prepBLASInt32(IR, RowOff, Downcast);
     Offset = IR.CreateMul(RowOffI32, LD, "row_off_scaled");
-    errs() << "  Row offset computed: " << *Offset << "\n";
   }
   
-  // Add col_offset
+  // Add col_offset.
   if (ColOff) {
     Value *ColOffI32 = prepBLASInt32(IR, ColOff, Downcast);
     Offset = Offset ? IR.CreateAdd(Offset, ColOffI32, "offset") : ColOffI32;
-    errs() << "  After adding col offset: " << *Offset << "\n";
   }
   
-  // **CRITICAL FIX**: Add the accumulated offset from unwrapped GEPs
+  // Add the accumulated offset from unwrapped GEPs.
   // This handles the case where the pattern matcher captured a pre-offset base like:
   //   BasePtrToB = %32 = getelementptr float, ptr %8, i64 %29
-  // We unwrapped to get %8, but we need to preserve %29 in our computation
+  // We unwrapped to get %8, but we need to preserve %29 in our computation.
   if (AccumulatedOffset) {
     Value *AccumOffI32 = prepBLASInt32(IR, AccumulatedOffset, Downcast);
     Offset = Offset ? IR.CreateAdd(Offset, AccumOffI32, "total_offset") : AccumOffI32;
-    errs() << "  After adding accumulated GEP offsets: " << *Offset << "\n";
   }
   
-  if (!Offset) {
-    errs() << "  Somehow no offset was computed, returning TrueBase\n";
-    errs() << "=== END computeSubmatrixPtr ===\n\n";
+  if (!Offset)
     return TrueBase;
-  }
   
-  // Apply offset to true base pointer
+  // Apply offset to true base pointer.
   Value *Result = IR.CreateGEP(ElementTy, TrueBase, Offset, "submatrix_ptr");
-  errs() << "  Final result: " << *Result << "\n";
-  errs() << "=== END computeSubmatrixPtr ===\n\n";
   
   return Result;
 }
