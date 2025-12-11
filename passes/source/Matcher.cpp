@@ -269,24 +269,26 @@ match1Dor2DPtrOpAndInductionVariables(GetElementPtrInst *&GEPInst, Value *&Op,
   auto Pattern4 = m_GEP(GEPInst, m_Value(Op), m_PHI(PHI1), m_PHI(PHI2));
   auto Pattern5 = m_GEP(GEPInst, m_Value(Op), linearFunctionOfPHI(PHI1, PHI2, LD));
   
- // Linearized 2D access
+ // Linearized 2D access: matches (offset + col) + (LD * row)
+ // PHI1 = row (multiplied by LD), PHI2 = col (added to offset)
+ // This is consistent with Pattern4 and Pattern5 conventions
  auto Pattern6 = m_GEP(
     GEPInst, m_Value(Op),
     m_CombineOr(
         m_CombineOr(
             m_SExt(m_Add(
-                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))),
-                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))))),
+                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
+                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))))),
             m_SExt(m_Add(
-                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
-                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))))),
+                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))),
+                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2)))))),
         m_CombineOr(
             m_Add(
-                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))),
-                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2)))),
+                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
+                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))),
             m_Add(
-                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2))),
-                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1)))))));
+                m_Mul(m_Value(LD), m_CombineOr(m_Trunc(m_PHI(PHI1)), m_PHI(PHI1))),
+                m_Add(m_Value(), m_CombineOr(m_Trunc(m_PHI(PHI2)), m_PHI(PHI2)))))));
   
   // Nested GEP for 2D submatrix access
   auto Pattern7 = m_GEP(
