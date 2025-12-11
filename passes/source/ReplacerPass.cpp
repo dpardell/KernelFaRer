@@ -180,6 +180,96 @@ Value *getIncOrOne(IRBuilder<> &IR, Value *Inc, bool &Downcast) {
   return prepBLASInt32(IR, Inc, Downcast);
 }
 
+Value *computeSubmatrixPtr(IRBuilder<> &IR, Value *Base, Value *RowOff, 
+                           Value *ColOff, Value *LD, Type *ElementTy, 
+                           bool &Downcast) {
+  errs() << "\n=== computeSubmatrixPtr DEBUG ===\n";
+  errs() << "  Base (input): " << *Base << "\n";
+  if (RowOff) errs() << "  RowOff: " << *RowOff << "\n";
+  else errs() << "  RowOff: nullptr\n";
+  if (ColOff) errs() << "  ColOff: " << *ColOff << "\n";
+  else errs() << "  ColOff: nullptr\n";
+  
+  // Unwrap any GEPs to get the true base pointer AND accumulate their offsets
+  Value *TrueBase = Base;
+  Value *AccumulatedOffset = nullptr;
+  
+  while (auto *GEP = dyn_cast<GetElementPtrInst>(TrueBase)) {
+    errs() << "  Unwrapping GEP: " << *GEP << "\n";
+    
+    // Get the index from this GEP (last operand)
+    if (GEP->getNumOperands() >= 2) {
+      Value *GEPIdx = GEP->getOperand(GEP->getNumOperands() - 1);
+      errs() << "    GEP index: " << *GEPIdx << "\n";
+      
+      // Accumulate this offset
+      if (AccumulatedOffset) {
+        AccumulatedOffset = IR.CreateAdd(AccumulatedOffset, GEPIdx, "accumulated_off");
+      } else {
+        AccumulatedOffset = GEPIdx;
+      }
+      errs() << "    Accumulated offset so far: " << *AccumulatedOffset << "\n";
+    }
+    
+    // Move to the pointer operand
+    TrueBase = GEP->getPointerOperand();
+    errs() << "    Unwrapped to base: " << *TrueBase << "\n";
+  }
+  
+  errs() << "  Final TrueBase: " << *TrueBase << "\n";
+  if (AccumulatedOffset) {
+    errs() << "  AccumulatedOffset from unwrapped GEPs: " << *AccumulatedOffset << "\n";
+  } else {
+    errs() << "  AccumulatedOffset: nullptr\n";
+  }
+  
+  // If no offsets at all, return the true base
+  if (!RowOff && !ColOff && !AccumulatedOffset) {
+    errs() << "  No offsets, returning TrueBase as-is\n";
+    errs() << "=== END computeSubmatrixPtr ===\n\n";
+    return TrueBase;
+  }
+  
+  Value *Offset = nullptr;
+  
+  // Compute row_offset * ld
+  if (RowOff && LD) {
+    Value *RowOffI32 = prepBLASInt32(IR, RowOff, Downcast);
+    Offset = IR.CreateMul(RowOffI32, LD, "row_off_scaled");
+    errs() << "  Row offset computed: " << *Offset << "\n";
+  }
+  
+  // Add col_offset
+  if (ColOff) {
+    Value *ColOffI32 = prepBLASInt32(IR, ColOff, Downcast);
+    Offset = Offset ? IR.CreateAdd(Offset, ColOffI32, "offset") : ColOffI32;
+    errs() << "  After adding col offset: " << *Offset << "\n";
+  }
+  
+  // **CRITICAL FIX**: Add the accumulated offset from unwrapped GEPs
+  // This handles the case where the pattern matcher captured a pre-offset base like:
+  //   BasePtrToB = %32 = getelementptr float, ptr %8, i64 %29
+  // We unwrapped to get %8, but we need to preserve %29 in our computation
+  if (AccumulatedOffset) {
+    Value *AccumOffI32 = prepBLASInt32(IR, AccumulatedOffset, Downcast);
+    Offset = Offset ? IR.CreateAdd(Offset, AccumOffI32, "total_offset") : AccumOffI32;
+    errs() << "  After adding accumulated GEP offsets: " << *Offset << "\n";
+  }
+  
+  if (!Offset) {
+    errs() << "  Somehow no offset was computed, returning TrueBase\n";
+    errs() << "=== END computeSubmatrixPtr ===\n\n";
+    return TrueBase;
+  }
+  
+  // Apply offset to true base pointer
+  Value *Result = IR.CreateGEP(ElementTy, TrueBase, Offset, "submatrix_ptr");
+  errs() << "  Final result: " << *Result << "\n";
+  errs() << "=== END computeSubmatrixPtr ===\n\n";
+  
+  return Result;
+}
+
 inline void insertNoInlineCall(Module &M, IRBuilder<> &IR,
                                ArrayRef<Type *> ArgTys, ArrayRef<Value *> Args,
                                StringRef FunctionName) {
@@ -202,7 +292,7 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
   const KernelFaRer::Matrix &MB = Gemm.getMatrixB();
   const KernelFaRer::Matrix &MC = Gemm.getMatrixC();
 
-  // Matrix C's layout defines cblas_X() layout bacause it cannot be trasposed.
+  // Matrix C's layout defines cblas_X() layout because it cannot be transposed.
   ConstantInt *Layout = IR.getInt32(MC.getLayout());
   ConstantInt *TransA =
       IR.getInt32(MA.getLayout() == MC.getLayout() ? CBLAS_TRANSPOSE::NoTrans
@@ -219,22 +309,34 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
   auto *K = prepBLASInt32(IR, &MA.getColumns(), Downcast);
   auto *N = prepBLASInt32(IR, &MB.getColumns(), Downcast);
 
-  // Args for memory pointers to A, B, C
-  auto *A = &MA.getBaseAddressPointer();
-  auto *B = &MB.getBaseAddressPointer();
-  auto *C = &MC.getBaseAddressPointer();
+  // C's pointed to type defines the operation type.
+  auto *OpTy = MC.getScalarElementType();
 
-  // Make args for LDA, LDB, LDC, adjusting for increments if present
-  auto *LDA = prepBLASInt32(IR, &MA.getLeadingDimensionSize(), Downcast);
-  auto *LDB = prepBLASInt32(IR, &MB.getLeadingDimensionSize(), Downcast);
-  auto *LDC = prepBLASInt32(IR, &MC.getLeadingDimensionSize(), Downcast);
+  // Get base pointers.
+  auto *ABase = &MA.getBaseAddressPointer();
+  auto *BBase = &MB.getBaseAddressPointer();
+  auto *CBase = &MC.getBaseAddressPointer();
+
+  // Get original LD values for offset calculation
+  Value *LDA_orig = &MA.getLeadingDimensionSize();
+  Value *LDB_orig = &MB.getLeadingDimensionSize();
+  Value *LDC_orig = &MC.getLeadingDimensionSize();
+
+  // Compute adjusted pointers using original LD values
+  auto *A = computeSubmatrixPtr(IR, ABase, MA.getRowOffset(), MA.getColOffset(), LDA_orig, OpTy, Downcast);
+  auto *B = computeSubmatrixPtr(IR, BBase, MB.getRowOffset(), MB.getColOffset(), LDB_orig, OpTy, Downcast);
+  auto *C = computeSubmatrixPtr(IR, CBase, MC.getRowOffset(), MC.getColOffset(), LDC_orig, OpTy, Downcast);
+
+  // Downcast to i32 for BLAS interface
+  auto *LDA = prepBLASInt32(IR, LDA_orig, Downcast);
+  auto *LDB = prepBLASInt32(IR, LDB_orig, Downcast);
+  auto *LDC = prepBLASInt32(IR, LDC_orig, Downcast);
   
   Value *IncI = Gemm.getIncI(); 
   Value *IncJ = Gemm.getIncJ(); 
   Value *IncK = Gemm.getIncK();
 
-  
-  // Adjust leading dimensions based on increments
+  // Adjust leading dimensions based on increments.
   if (IncI && !isIncOne(IncI)) {
     Value *IncIVal = getIncOrOne(IR, IncI, Downcast);
     LDA = IR.CreateMul(LDA, IncIVal);
@@ -254,7 +356,7 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
     LDC = IR.CreateMul(LDC, IncKVal);
   }
   
-  // Adjust dimensions M, N, K based on increments
+  // Adjust dimensions M, N, K based on increments.
   Value *One = IR.getInt32(1);
   if (IncI && !isIncOne(IncI)) {
     Value *IncIVal = getIncOrOne(IR, IncI, Downcast);
@@ -276,9 +378,6 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
     Value *KPlusIncMinusOne = IR.CreateAdd(K, IncMinusOne);
     K = IR.CreateUDiv(KPlusIncMinusOne, IncKVal);
   }
-
-  // C's pointed to type defines the operation type.
-  auto *OpTy = MC.getScalarElementType();
 
   // Make args for alpha/beta.
   Value *Alpha = prepBLASScalar(IR, Gemm.getAlpha(), OpTy);
@@ -304,7 +403,7 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
   Value *Args[] = {Layout, TransA, TransB, M,   N,    K, Alpha,
                    A,      LDA,    B,      LDB, Beta, C, LDC};
 
-  // Insert prepared call in the IR
+  // Insert prepared call in the IR.
   StringRef BlasFunctionName =
       OpTy == IR.getFloatTy() ? "cblas_sgemm" : "cblas_dgemm";
   insertNoInlineCall(Mod, IR, ArgTys, Args, BlasFunctionName);

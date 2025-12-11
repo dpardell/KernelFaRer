@@ -65,15 +65,19 @@ class Matrix {
   Value &Columns;              ///< number of Columns
   Value &RowIV;                ///< induction variable to access rows
   Value &ColumnIV;             ///< induction variable to access columns
+  Value *RowOffset;            ///< base row offset for submatrix (e.g., row_A)
+  Value *ColOffset;            ///< base column offset for submatrix (e.g., col_A)
 
 public:
   Matrix(Type &EltType, Value &BaseAddressPointer, CBLAS_ORDER Layout,
          bool IsDoublePtr, Value &LeadingDimensionSize, Value &Rows,
-         Value &Columns, Value &RowIV, Value &ColumnIV)
+         Value &Columns, Value &RowIV, Value &ColumnIV,
+         Value *RowOffset = nullptr, Value *ColOffset = nullptr)
       : EltType(EltType), BaseAddressPointer(BaseAddressPointer),
         Layout(Layout), IsDoublePtr(IsDoublePtr),
         LeadingDimensionSize(LeadingDimensionSize), Rows(Rows),
-        Columns(Columns), RowIV(RowIV), ColumnIV(ColumnIV) {}
+        Columns(Columns), RowIV(RowIV), ColumnIV(ColumnIV),
+        RowOffset(RowOffset), ColOffset(ColOffset) {}
 
   Type &getElementType() const { return EltType; }
   Type *getScalarElementType() const {
@@ -94,6 +98,8 @@ public:
   Value &getColumns() const { return Columns; }
   Value &getRowIV() const { return RowIV; }
   Value &getColumnIV() const { return ColumnIV; }
+  Value *getRowOffset() const { return RowOffset; }
+  Value *getColOffset() const { return ColOffset; }
 }; // class Matrix
 
 /// Abstract class that represents a kernel computed within a triple-nested

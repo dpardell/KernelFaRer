@@ -439,6 +439,154 @@ static inline Value *extractIncrement(PHINode *const &V) {
   return nullptr;
 }
 
+// A helper function that extracts constant base offsets from a GEP instruction
+// for submatrix access patterns. For example, in A[(row_A + mm)*lda + (col_A + i)],
+// this extracts row_A and col_A as the base offsets.
+static void extractSubmatrixOffsets(GetElementPtrInst *GEP, PHINode *RowPHI, 
+                                     PHINode *ColPHI, Value *LD,
+                                     Value *&RowOffset, Value *&ColOffset,
+                                     Value *&ExtractedLD) {
+  if (!GEP || GEP->getNumOperands() < 2)
+    return;
+  
+  Value *IndexExpr = GEP->getOperand(GEP->getNumOperands() - 1);
+  
+  // Unwrap casts
+  while (auto *Cast = dyn_cast<CastInst>(IndexExpr))
+    IndexExpr = Cast->getOperand(0);
+  
+  // Helper: trace all PHIs this value depends on
+  auto FindAllPHIs = [](Value *V) -> SmallVector<PHINode*, 4> {
+    SmallVector<PHINode*, 4> PHIs;
+    SmallVector<Value *, 8> Worklist = {V};
+    SmallPtrSet<Value *, 8> Visited;
+    
+    while (!Worklist.empty()) {
+      Value *Cur = Worklist.pop_back_val();
+      if (!Visited.insert(Cur).second) continue;
+      
+      if (auto *PHI = dyn_cast<PHINode>(Cur))
+        PHIs.push_back(PHI);
+      
+      if (auto *Inst = dyn_cast<Instruction>(Cur))
+        for (Value *Op : Inst->operands())
+          Worklist.push_back(Op);
+    }
+    return PHIs;
+  };
+  
+  // PATTERN 1: Linearized Add pattern
+  if (auto *FinalAdd = dyn_cast<BinaryOperator>(IndexExpr)) {
+    if (FinalAdd->getOpcode() == Instruction::Add) {
+      Value *Op0 = FinalAdd->getOperand(0);
+      Value *Op1 = FinalAdd->getOperand(1);
+      
+      auto PHIs0 = FindAllPHIs(Op0);
+      auto PHIs1 = FindAllPHIs(Op1);
+      
+      Value *BaseIdx = (PHIs0.size() < PHIs1.size()) ? Op0 : 
+                       (PHIs1.size() < PHIs0.size()) ? Op1 : Op0;
+      
+      if (auto *BaseAdd = dyn_cast<BinaryOperator>(BaseIdx)) {
+        if (BaseAdd->getOpcode() != Instruction::Add)
+          return;
+        
+        Value *BaseOp0 = BaseAdd->getOperand(0);
+        Value *BaseOp1 = BaseAdd->getOperand(1);
+        
+        for (unsigned i = 0; i < 2; i++) {
+          Value *MaybeRow = (i == 0) ? BaseOp0 : BaseOp1;
+          Value *MaybeCol = (i == 0) ? BaseOp1 : BaseOp0;
+          
+          if (auto *MulOp = dyn_cast<BinaryOperator>(MaybeRow)) {
+            if (MulOp->getOpcode() != Instruction::Mul) continue;
+            
+            Value *MulLHS = MulOp->getOperand(0);
+            Value *MulRHS = MulOp->getOperand(1);
+            
+            auto MulLHSPHIs = FindAllPHIs(MulLHS);
+            auto MulRHSPHIs = FindAllPHIs(MulRHS);
+            
+            Value *RowExpr = nullptr;
+            
+            if (MulLHSPHIs.empty() && !MulRHSPHIs.empty()) {
+              ExtractedLD = MulLHS;
+              RowExpr = MulRHS;
+            } else if (MulRHSPHIs.empty() && !MulLHSPHIs.empty()) {
+              ExtractedLD = MulRHS;
+              RowExpr = MulLHS;
+            } else {
+              continue;
+            }
+            
+            if (auto *RowAdd = dyn_cast<BinaryOperator>(RowExpr)) {
+              if (RowAdd->getOpcode() == Instruction::Add) {
+                Value *RowOp0 = RowAdd->getOperand(0);
+                Value *RowOp1 = RowAdd->getOperand(1);
+                
+                auto RowPHIs0 = FindAllPHIs(RowOp0);
+                auto RowPHIs1 = FindAllPHIs(RowOp1);
+                
+                if (RowPHIs0.empty() && !RowPHIs1.empty())
+                  RowOffset = RowOp0;
+                else if (RowPHIs1.empty() && !RowPHIs0.empty())
+                  RowOffset = RowOp1;
+              }
+            }
+            
+            ColOffset = MaybeCol;
+            break;
+          }
+        }
+      }
+      return;
+    }
+  }
+  
+  // PATTERN 2: Mul-only pattern (nested GEP)
+  if (auto *MulOp = dyn_cast<BinaryOperator>(IndexExpr)) {
+    if (MulOp->getOpcode() == Instruction::Mul) {
+      Value *MulLHS = MulOp->getOperand(0);
+      Value *MulRHS = MulOp->getOperand(1);
+      
+      auto MulLHSPHIs = FindAllPHIs(MulLHS);
+      auto MulRHSPHIs = FindAllPHIs(MulRHS);
+      
+      Value *RowExpr = nullptr;
+      
+      if (MulLHSPHIs.empty() && !MulRHSPHIs.empty()) {
+        ExtractedLD = MulLHS;
+        RowExpr = MulRHS;
+      } else if (MulRHSPHIs.empty() && !MulLHSPHIs.empty()) {
+        ExtractedLD = MulRHS;
+        RowExpr = MulLHS;
+      } else {
+        return;
+      }
+      
+      // Extract row offset from RowExpr
+      if (auto *RowAdd = dyn_cast<BinaryOperator>(RowExpr)) {
+        if (RowAdd->getOpcode() == Instruction::Add) {
+          Value *RowOp0 = RowAdd->getOperand(0);
+          Value *RowOp1 = RowAdd->getOperand(1);
+          
+          auto RowPHIs0 = FindAllPHIs(RowOp0);
+          auto RowPHIs1 = FindAllPHIs(RowOp1);
+          
+          if (RowPHIs0.empty() && !RowPHIs1.empty())
+            RowOffset = RowOp0;
+          else if (RowPHIs1.empty() && !RowPHIs0.empty())
+            RowOffset = RowOp1;
+        }
+      }
+      
+      // For nested GEP pattern, the column offset is already baked into
+      // the base pointer captured by the pattern matcher. We leave
+      // ColOffset = nullptr to avoid double-counting.
+    }
+  }
+}
+
 // A helper function that the inserts in Loops list the innermost loop nested
 // in L, or L itself if L does not have sub-loops.
 static void collecInnermostLoops(const Loop *L,
@@ -592,7 +740,7 @@ static Loop *getOuterLoop(LoopInfo &LI, Value *const &I, Value *const &J,
 // false, since their respective accesses are not part of a GEMM. Otherwise,
 // this function returns true and ALayout, BLayout, and CLayout accordingly.
 //
-// NOTE: For 1D linearized submatrix access, A2 and/or C2 may be NULL on input.
+// Note: For 1D linearized submatrix access, A2 and/or C2 may be NULL on input.
 // This function will infer missing PHIs from the loop structure and captured PHIs.
 static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
                               PHINode *&B2, PHINode *&C1, PHINode *&C2,
@@ -601,7 +749,31 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
                               Value *&K, Value *&IncI, Value *&IncJ, Value *&IncK,
                               LoopInfo &LI) {
   
-  // Handle 1D linearized submatrix access and infer missing PHIs
+  if (A1 == nullptr || B1 == nullptr || B2 == nullptr || C1 == nullptr)
+    return false;
+  
+  bool Matched = true;
+
+  // Extract increments from original (innermost) PHI nodes before transforming them.
+  Value *IncA1 = extractIncrement(A1);
+  Value *IncA2 = A2 ? extractIncrement(A2) : nullptr;
+  Value *IncB1 = extractIncrement(B1);
+  Value *IncB2 = extractIncrement(B2);
+  Value *IncC1 = extractIncrement(C1);
+  Value *IncC2 = C2 ? extractIncrement(C2) : nullptr;
+
+  // Extract outermost PHI nodes to normalize the loop nest structure.
+  A1 = extractOutermostPHI(A1);
+  if (A2) A2 = extractOutermostPHI(A2);
+  B1 = extractOutermostPHI(B1);
+  B2 = extractOutermostPHI(B2);
+  C1 = extractOutermostPHI(C1);
+  if (C2) C2 = extractOutermostPHI(C2);
+  
+  if (A1 == nullptr || B1 == nullptr || B2 == nullptr || C1 == nullptr)
+    return false;
+
+  // Infer missing PHI nodes for matrices with linearized indexing.
   if ((A2 == nullptr || C2 == nullptr) && B1 != nullptr && B2 != nullptr) {
     std::set<PHINode*> CapturedPHIs;
     if (A1) CapturedPHIs.insert(A1);
@@ -610,8 +782,10 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     if (B2) CapturedPHIs.insert(B2);
     if (C1) CapturedPHIs.insert(C1);
     if (C2) CapturedPHIs.insert(C2);
-    
+
     PHINode *MissingPHI = nullptr;
+
+    // Find the missing PHI by searching the loop nest for uncaptured PHIs.
     if (CapturedPHIs.size() == 2) {
       PHINode *ReferencePHI = *CapturedPHIs.begin();
       Loop *InnerLoop = LI.getLoopFor(ReferencePHI->getParent());
@@ -631,56 +805,34 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
       }
     }
     
-    // Infer A2 and C2 based on GEMM dimension semantics
+    // Infer A2 based on whether A1 was correctly or incorrectly captured.
     if (A2 == nullptr && A1 != nullptr) {
       if (A1 == B1 || A1 == B2) {
-        if (C1 != nullptr && C1 != B1 && C1 != B2)
-          A2 = C1;
-        else if (C2 != nullptr && C2 != B1 && C2 != B2)
-          A2 = C2;
-        else if (MissingPHI != nullptr)
-          A2 = MissingPHI;
+        // A1 was wrongly captured as the reduction dimension so swap it.
+        if (MissingPHI != nullptr) {
+          A2 = A1;
+          A1 = MissingPHI;
+        }
       } else {
+        // A1 is correctly the row dimension; A2 is the reduction dimension.
         A2 = B1;
       }
     }
-    
+
+    // Infer C2 with the same logic.
     if (C2 == nullptr && C1 != nullptr) {
-      if (C1 == B2)
-        C2 = A2;
-      else if (C1 == B1)
+      if (C1 == B1 || C1 == B2) {
+        // C1 was wrongly captured so swap it.
+        if (MissingPHI != nullptr) {
+          C2 = C1;
+          C1 = MissingPHI;
+        }
+      } else {
+        // C1 is correct; C2 is the column dimension.
         C2 = B2;
-      else
-        C2 = B2;
-      
-      if (C2 == nullptr && MissingPHI != nullptr)
-        C2 = MissingPHI;
+      }
     }
   }
-  
-  if (A1 == nullptr || B1 == nullptr || B2 == nullptr || C1 == nullptr)
-    return false;
-  
-  bool Matched = true;
-
-  // Extract increments from original (innermost) PHI nodes
-  Value *IncA1 = extractIncrement(A1);
-  Value *IncA2 = A2 ? extractIncrement(A2) : nullptr;
-  Value *IncB1 = extractIncrement(B1);
-  Value *IncB2 = extractIncrement(B2);
-  Value *IncC1 = extractIncrement(C1);
-  Value *IncC2 = C2 ? extractIncrement(C2) : nullptr;
-
-  // Extract outermost PHI nodes
-  A1 = extractOutermostPHI(A1);
-  if (A2) A2 = extractOutermostPHI(A2);
-  B1 = extractOutermostPHI(B1);
-  B2 = extractOutermostPHI(B2);
-  C1 = extractOutermostPHI(C1);
-  if (C2) C2 = extractOutermostPHI(C2);
-  
-  if (A1 == nullptr || B1 == nullptr || B2 == nullptr || C1 == nullptr)
-    return false;
 
   PHINode *II = nullptr;
   PHINode *JJ = nullptr;
@@ -697,6 +849,7 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else if (A2 == C2 && B2 == C1)
       CLayout = CBLAS_ORDER::ColMajor;
     else
+      // Not GEMM
       Matched = false;
   } else if (A1 == B2) {
     II = A2;
@@ -709,6 +862,7 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else if (A2 == C2 && B1 == C1)
       CLayout = CBLAS_ORDER::ColMajor;
     else
+      // Not GEMM
       Matched = false;
   } else if (A2 == B1) {
     II = A1;
@@ -721,6 +875,7 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else if (A1 == C2 && B2 == C1)
       CLayout = CBLAS_ORDER::ColMajor;
     else
+      // Not GEMM
       Matched = false;
   } else if (A2 == B2) {
     II = A1;
@@ -733,8 +888,10 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     else if (A1 == C2 && B1 == C1)
       CLayout = CBLAS_ORDER::ColMajor;
     else
+      // Not GEMM
       Matched = false;
   } else {
+    // Not GEMM
     Matched = false;
   }
   
@@ -742,23 +899,27 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
     auto DepthI = LI.getLoopDepth(II->getParent());
     auto DepthJ = LI.getLoopDepth(JJ->getParent());
     auto DepthK = LI.getLoopDepth(KK->getParent());
+    
     if (DepthI != DepthJ && DepthJ != DepthK && DepthI != DepthK) {
       I = II;
       J = JJ;
       K = KK;
-      // Map increments to I, J, K based on the same mapping
+      
+      // Map the increments to their corresponding loop dimensions.
       if (II == A1) IncI = IncA1;
       else if (II == A2) IncI = IncA2;
       else if (II == B1) IncI = IncB1;
       else if (II == B2) IncI = IncB2;
       else if (II == C1) IncI = IncC1;
       else if (II == C2) IncI = IncC2;
+      
       if (JJ == A1) IncJ = IncA1;
       else if (JJ == A2) IncJ = IncA2;
       else if (JJ == B1) IncJ = IncB1;
       else if (JJ == B2) IncJ = IncB2;
       else if (JJ == C1) IncJ = IncC1;
       else if (JJ == C2) IncJ = IncC2;
+      
       if (KK == A1) IncK = IncA1;
       else if (KK == A2) IncK = IncA2;
       else if (KK == B1) IncK = IncB1;
@@ -766,9 +927,11 @@ static bool matchMatrixLayout(PHINode *&A1, PHINode *&A2, PHINode *&B1,
       else if (KK == C1) IncK = IncC1;
       else if (KK == C2) IncK = IncC2;
     } else {
+      // Not GEMM
       Matched = false;
     }
   }
+
   return Matched;
 }
 
@@ -867,7 +1030,6 @@ static bool matchSyr2kIndVarAndLayout(Value *const &PtrToA, Value *&PtrToA2,
 
   return false;
 }
-
 
 // Helper function to extract PHI nodes from TRMM's GEP patterns.
 // Handles both lower (backward, mm-1) and upper (forward, mm) triangular cases.
@@ -1002,7 +1164,7 @@ static bool matchGEMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
   bool IsGEMM = false;
   if (match(SeedInstAsValue, Matcher) && BasePtrToA != BasePtrToC &&
       BasePtrToB != BasePtrToC &&
-      // prevents the match of double scaling with alpha
+      // Prevents the match of double scaling with alpha.
       (Alpha == nullptr || Alpha1 == nullptr) &&
       // LoadPtrOP equals MatchedGEP when old values of C is part of reduction,
       // i.e., when we have expressions of the form:
@@ -1015,6 +1177,35 @@ static bool matchGEMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
     if (Alpha == nullptr)
       Alpha = Alpha1;
     IsCReduced = MatchedGEP != nullptr || Beta != nullptr;
+    
+    // Extract submatrix offsets.
+    Value *ARowOffset = nullptr;
+    Value *AColOffset = nullptr;
+    Value *BRowOffset = nullptr;
+    Value *BColOffset = nullptr;
+    Value *CRowOffset = nullptr;
+    Value *CColOffset = nullptr;
+    
+    // Variables to capture extracted LD values from GEP patterns.
+    Value *ExtractedLDA = nullptr;
+    Value *ExtractedLDB = nullptr;
+    Value *ExtractedLDC = nullptr;
+    
+    if (GEPA && APHI1 && APHI2)
+      extractSubmatrixOffsets(GEPA, APHI1, APHI2, LDA, ARowOffset, AColOffset, ExtractedLDA);
+    if (GEPB && BPHI1 && BPHI2)
+      extractSubmatrixOffsets(GEPB, BPHI1, BPHI2, LDB, BRowOffset, BColOffset, ExtractedLDB);
+    if (GEPC && CPHI1 && CPHI2)
+      extractSubmatrixOffsets(GEPC, CPHI1, CPHI2, LDC, CRowOffset, CColOffset, ExtractedLDC);
+    
+    // Use extracted LD values as fallback if pattern matching didn't capture them.
+    if (LDA == nullptr && ExtractedLDA != nullptr)
+      LDA = ExtractedLDA;
+    if (LDB == nullptr && ExtractedLDB != nullptr)
+      LDB = ExtractedLDB;
+    if (LDC == nullptr && ExtractedLDC != nullptr)
+      LDC = ExtractedLDC;
+
     IsGEMM = true;
   }
   return IsGEMM;
@@ -1461,8 +1652,47 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
         }
 
         // Keep matched LDC for easier matching of initalization stores to
-        // matrix C
+        // matrix C.
         Value *MatchedLDC = LDC;
+
+        // Extract submatrix row/column base offsets from GEP patterns.
+        Value *ARowOffset = nullptr;
+        Value *AColOffset = nullptr;
+        Value *BRowOffset = nullptr;
+        Value *BColOffset = nullptr;
+        Value *CRowOffset = nullptr;
+        Value *CColOffset = nullptr;
+
+        // Only extract offsets for GEMM.
+        if (KT == Kernel::KernelType::GEMM_KERNEL) {
+          // Get the original PHI nodes for offset extraction.
+          PHINode *APHI1 = dyn_cast<PHINode>(IVarI);
+          PHINode *APHI2 = dyn_cast<PHINode>(IVarK);
+          PHINode *BPHI1 = dyn_cast<PHINode>(IVarK);
+          PHINode *BPHI2 = dyn_cast<PHINode>(IVarJ);
+          PHINode *CPHI1 = dyn_cast<PHINode>(IVarI);
+          PHINode *CPHI2 = dyn_cast<PHINode>(IVarJ);
+
+          // Variables to capture extracted LD values.
+          Value *ExtractedLDA = nullptr;
+          Value *ExtractedLDB = nullptr;
+          Value *ExtractedLDC = nullptr;
+
+          if (GEPA && APHI1 && APHI2) 
+            extractSubmatrixOffsets(GEPA, APHI1, APHI2, LDA, ARowOffset, AColOffset, ExtractedLDA);
+          if (GEPB && BPHI1 && BPHI2) 
+            extractSubmatrixOffsets(GEPB, BPHI1, BPHI2, LDB, BRowOffset, BColOffset, ExtractedLDB);
+          if (GEPC && CPHI1 && CPHI2) 
+            extractSubmatrixOffsets(GEPC, CPHI1, CPHI2, LDC, CRowOffset, CColOffset, ExtractedLDC);
+          
+          // Use extracted LD values as fallback if pattern matching didn't capture them.
+          if (LDA == nullptr && ExtractedLDA != nullptr)
+            LDA = ExtractedLDA;
+          if (LDB == nullptr && ExtractedLDB != nullptr)
+            LDB = ExtractedLDB;
+          if (LDC == nullptr && ExtractedLDC != nullptr) 
+            LDC = ExtractedLDC;
+        }
 
         Stores.insert(&*Inst);
         
@@ -1571,11 +1801,11 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
 
           // Matrices constructed from matched values and deduced layouts.
           Matrix MatrixA(*AElType, *BasePtrToA, ALayout, IsADoublePtr, *LDA, *M,
-                         *K, *IVarI, *IVarK);
+                         *K, *IVarI, *IVarK, ARowOffset, AColOffset);
           Matrix MatrixB(*BElType, *BasePtrToB, BLayout, IsBDoublePtr, *LDB, *K,
-                         *N, *IVarK, *IVarJ);
+                         *N, *IVarK, *IVarJ, BRowOffset, BColOffset);
           Matrix MatrixC(*CElType, *BasePtrToC, CLayout, IsCDoublePtr, *LDC, *M,
-                         *N, *IVarI, *IVarJ);
+                         *N, *IVarI, *IVarJ, CRowOffset, CColOffset);
           ListOfKernels->push_back(
               std::make_unique<GEMM>(*OuterLoop, *Inst, MatrixA, MatrixB,
                                      MatrixC, Stores, IsCReduced, Alpha, Beta, IncI, IncJ, IncK));
