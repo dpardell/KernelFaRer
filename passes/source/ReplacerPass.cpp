@@ -464,13 +464,13 @@ void buildBLASTRMMCall(Module &Mod, IRBuilder<> &IR, const Kernel &Trmm) {
   // Determine if A is upper or lower triangular
   const auto *TrmmKer = cast<KernelFaRer::TRMM>(&Trmm);
   ConstantInt *Uplo = IR.getInt32(TrmmKer->isLowerTriangular() 
-                                   ? CBLAS_UPLO::Lower 
-                                   : CBLAS_UPLO::Upper);
+                                  ? CBLAS_UPLO::Lower 
+                                  : CBLAS_UPLO::Upper);
   
   // Transpose A if layouts don't match
   ConstantInt *TransA = IR.getInt32(MA.getLayout() == MB.getLayout() 
-                                     ? CBLAS_TRANSPOSE::NoTrans
-                                     : CBLAS_TRANSPOSE::Trans);
+                                    ? CBLAS_TRANSPOSE::NoTrans
+                                    : CBLAS_TRANSPOSE::Trans);
   
   // Non-unit diagonal
   ConstantInt *Diag = IR.getInt32(CBLAS_DIAG::NonUnit);

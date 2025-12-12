@@ -1034,14 +1034,17 @@ static bool matchSyr2kIndVarAndLayout(Value *const &PtrToA, Value *&PtrToA2,
 }
 
 // Helper function to extract PHI nodes from TRMM's GEP patterns.
-// Handles forward iteration for both lower and upper triangular cases.
+// Handles both forward and backward iteration for lower and upper triangular cases.
 static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
                                     StoreInst *Store, PHINode *&APHI1,
                                     PHINode *&APHI2, PHINode *&BPHI1,
                                     PHINode *&BPHI2, Value *&BasePtrToA,
                                     Value *&BasePtrToB, Value *&LDA,
-                                    Value *&LDB) {
-  // Extract from Load0 (matrix A).
+                                    Value *&LDB, LoopInfo &LI,
+                                    CBLAS_ORDER &ALayout,
+                                    CBLAS_ORDER &BLayout)
+{
+  // Extract from Load0 (Matrix A).
   auto *Load0GEP = dyn_cast<GetElementPtrInst>(Load0->getPointerOperand());
   if (!Load0GEP)
     return false;
@@ -1051,17 +1054,58 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
     return false;
 
   BasePtrToA = Load0BaseGEP->getPointerOperand();
-  Value *Load0BaseIdx = Load0BaseGEP->getOperand(1);  // mm
-  Value *Load0OuterIdx = Load0GEP->getOperand(1);     // k*lda
+  Value *Load0BaseIdx = Load0BaseGEP->getOperand(1);
+  Value *Load0OuterIdx = Load0GEP->getOperand(1);
 
-  // Extract mm PHI.
-  APHI1 = dyn_cast<PHINode>(Load0BaseIdx);
-  if (!APHI1)
+  // Extract mm PHI (handles forward and backward iteration)
+  PHINode *mmPHI = dyn_cast<PHINode>(Load0BaseIdx);
+  
+  // Try extracting from multiplication,
+  if (!mmPHI) {
+    if (auto *Mul = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
+      if (Mul->getOpcode() == Instruction::Mul) {
+        mmPHI = dyn_cast<PHINode>(Mul->getOperand(0));
+        if (!mmPHI)
+          mmPHI = dyn_cast<PHINode>(Mul->getOperand(1));
+      }
+    }
+  }
+  
+  // Try extracting from Add/Sub (backward iteration)
+  if (!mmPHI) {
+    if (auto *BinOp = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
+      if (BinOp->getOpcode() == Instruction::Add || 
+          BinOp->getOpcode() == Instruction::Sub) {
+        mmPHI = dyn_cast<PHINode>(BinOp->getOperand(0));
+        if (!mmPHI)
+          mmPHI = dyn_cast<PHINode>(BinOp->getOperand(1));
+      }
+    }
+  }
+  
+  if (!mmPHI)
     return false;
 
-  // Extract k PHI from (k*lda).
-  if (auto *Mul = dyn_cast<BinaryOperator>(Load0OuterIdx)) {
+  // Determine A layout based on GEP structure.
+  if (auto *kPHI = dyn_cast<PHINode>(Load0OuterIdx)) {
+    // Row-major
+    ALayout = CBLAS_ORDER::RowMajor;
+    APHI1 = mmPHI;
+    APHI2 = kPHI;
+    
+    // Extract LDA from multiplication.
+    if (auto *Mul = dyn_cast<BinaryOperator>(Load0BaseIdx)) {
+      if (Mul->getOpcode() == Instruction::Mul) {
+        LDA = (Mul->getOperand(0) == mmPHI) ? Mul->getOperand(1) : Mul->getOperand(0);
+      }
+    }
+  }
+  else if (auto *Mul = dyn_cast<BinaryOperator>(Load0OuterIdx)) {
     if (Mul->getOpcode() == Instruction::Mul) {
+      // Column-major
+      ALayout = CBLAS_ORDER::ColMajor;
+      APHI1 = mmPHI;
+      
       if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
         APHI2 = P;
         LDA = Mul->getOperand(1);
@@ -1072,10 +1116,10 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
     }
   }
 
-  if (!APHI2)
+  if (!APHI1 || !APHI2)
     return false;
 
-  // Extract from Load1 (matrix B).
+  // Extract from Load1 (Matrix B).
   auto *Load1GEP = dyn_cast<GetElementPtrInst>(Load1->getPointerOperand());
   if (!Load1GEP)
     return false;
@@ -1085,31 +1129,95 @@ static bool extractTRMMPHIsFromGEPs(LoadInst *Load0, LoadInst *Load1,
     return false;
 
   BasePtrToB = Load1BaseGEP->getPointerOperand();
-  Value *Load1BaseIdx = Load1BaseGEP->getOperand(1);  // nn*ldb
-  Value *Load1OuterIdx = Load1GEP->getOperand(1);     // k
+  Value *Load1BaseIdx = Load1BaseGEP->getOperand(1);
+  Value *Load1OuterIdx = Load1GEP->getOperand(1);
 
-  // Extract k PHI directly.
-  BPHI1 = dyn_cast<PHINode>(Load1OuterIdx);
-  if (!BPHI1)
-    return false;
-
-  // Extract nn PHI from (nn*ldb).
-  if (auto *Mul = dyn_cast<BinaryOperator>(Load1BaseIdx)) {
-    if (Mul->getOpcode() == Instruction::Mul) {
-      if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
-        BPHI2 = P;
-        LDB = Mul->getOperand(1);
-      } else if (auto *P = dyn_cast<PHINode>(Mul->getOperand(1))) {
-        BPHI2 = P;
-        LDB = Mul->getOperand(0);
+  // Helper to extract PHI from index.
+  auto extractPHIFromIndex = [](Value *Idx) -> PHINode* {
+    if (auto *P = dyn_cast<PHINode>(Idx))
+      return P;
+    if (auto *BinOp = dyn_cast<BinaryOperator>(Idx)) {
+      if (BinOp->getOpcode() == Instruction::Add || 
+          BinOp->getOpcode() == Instruction::Sub) {
+        if (auto *P = dyn_cast<PHINode>(BinOp->getOperand(0)))
+          return P;
+        if (auto *P = dyn_cast<PHINode>(BinOp->getOperand(1)))
+          return P;
+      }
+    }
+    return nullptr;
+  };
+  
+  // Pattern 1: Base=PHI, Outer=Mul
+  PHINode *basePHI = extractPHIFromIndex(Load1BaseIdx);
+  if (basePHI && !BPHI1 && !BPHI2) {
+    if (auto *Mul = dyn_cast<BinaryOperator>(Load1OuterIdx)) {
+      if (Mul->getOpcode() == Instruction::Mul) {
+        PHINode *mulPHI = nullptr;
+        if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
+          mulPHI = P;
+          LDB = Mul->getOperand(1);
+        } else if (auto *P = dyn_cast<PHINode>(Mul->getOperand(1))) {
+          mulPHI = P;
+          LDB = Mul->getOperand(0);
+        }
+        
+        if (mulPHI) {
+          auto baseDepth = LI.getLoopDepth(basePHI->getParent());
+          auto mulDepth = LI.getLoopDepth(mulPHI->getParent());
+          
+          if (mulDepth > baseDepth) {
+            BLayout = CBLAS_ORDER::RowMajor;
+            BPHI1 = mulPHI;
+            BPHI2 = basePHI;
+          } else {
+            BLayout = CBLAS_ORDER::ColMajor;
+            BPHI1 = basePHI;
+            BPHI2 = mulPHI;
+          }
+        }
+      }
+    }
+  }
+  
+  // Pattern 2: Base=Mul, Outer=PHI
+  if (!BPHI1 || !BPHI2) {
+    PHINode *outerPHI = extractPHIFromIndex(Load1OuterIdx);
+    if (outerPHI) {
+      if (auto *Mul = dyn_cast<BinaryOperator>(Load1BaseIdx)) {
+        if (Mul->getOpcode() == Instruction::Mul) {
+          PHINode *mulPHI = nullptr;
+          if (auto *P = dyn_cast<PHINode>(Mul->getOperand(0))) {
+            mulPHI = P;
+            LDB = Mul->getOperand(1);
+          } else if (auto *P = dyn_cast<PHINode>(Mul->getOperand(1))) {
+            mulPHI = P;
+            LDB = Mul->getOperand(0);
+          }
+          
+          if (mulPHI) {
+            auto outerDepth = LI.getLoopDepth(outerPHI->getParent());
+            auto mulDepth = LI.getLoopDepth(mulPHI->getParent());
+            
+            if (outerDepth > mulDepth) {
+              BLayout = CBLAS_ORDER::ColMajor;
+              BPHI1 = outerPHI;
+              BPHI2 = mulPHI;
+            } else {
+              BLayout = CBLAS_ORDER::RowMajor;
+              BPHI1 = mulPHI;
+              BPHI2 = outerPHI;
+            }
+          }
+        }
       }
     }
   }
 
-  if (!BPHI2)
+  if (!BPHI1 || !BPHI2)
     return false;
 
-  // Verify store points to same B matrix (in-place operation).
+  // Verify store points to B (in-place operation).
   auto *StoreGEP = dyn_cast<GetElementPtrInst>(Store->getPointerOperand());
   if (!StoreGEP)
     return false;
@@ -1264,13 +1372,14 @@ static bool matchTRMM(Instruction &SeedInst, Value *&IVarI, Value *&IVarJ,
   if (!Load0 || !Load1)
     return false;
 
-  // Extract PHIs.
+  // Extract PHIs and layouts.
   PHINode *APHI1 = nullptr;
   PHINode *APHI2 = nullptr;
   PHINode *BPHI1 = nullptr;
   PHINode *BPHI2 = nullptr;
   if (!extractTRMMPHIsFromGEPs(Load0, Load1, Store, APHI1, APHI2, BPHI1, BPHI2,
-                               BasePtrToA, BasePtrToB, LDA, LDB))
+                               BasePtrToA, BasePtrToB, LDA, LDB, LI, 
+                               ALayout, BLayout))
     return false;
 
   // Set GEP pointers for later use
@@ -1542,17 +1651,59 @@ KernelMatcher::Result KernelMatcher::run(Function &F, LoopInfo &LI,
                    matchLoopUpperBound(LI, static_cast<PHINode *>(IVarK), K)) {
           KT = Kernel::KernelType::GEMM_KERNEL;
         } else if (matchTRMM(*Inst, IVarI, IVarJ, IVarK, GEPA, BasePtrToA, GEPB,
-                   BasePtrToB, LDA, LDB, ALayout, BLayout, LI, Alpha,
-                   IncI, IncJ, IncK, IsLower)) {
-          // For TRMM, nn loop (IVarJ) should give us N
+                             BasePtrToB, LDA, LDB, ALayout, BLayout, LI, Alpha,
+                             IncI, IncJ, IncK, IsLower)) {
+          
+          // Extract N (nn loop is always forward iteration).
           if (!matchLoopUpperBound(LI, static_cast<PHINode *>(IVarJ), N))
             continue;
           
+          // Extract M (may be forward or backward iteration).
           PHINode *mmPHI = static_cast<PHINode *>(IVarI);
-          if (!matchLoopUpperBound(LI, mmPHI, M))
-            continue;
           
-          KT = Kernel::KernelType::TRMM_KERNEL;
+          // Try forward iteration first.
+          if (matchLoopUpperBound(LI, mmPHI, M)) {
+            KT = Kernel::KernelType::TRMM_KERNEL;
+          } else {
+            // Backward iteration (extract M from initial value).
+            Loop *mmLoop = LI.getLoopFor(mmPHI->getParent());
+            if (!mmLoop)
+              continue;
+            
+            BasicBlock *Preheader = mmLoop->getLoopPreheader();
+            if (!Preheader)
+              continue;
+            
+            Value *InitialValue = mmPHI->getIncomingValueForBlock(Preheader);
+            if (!InitialValue)
+              continue;
+            
+            // Unwrap casts.
+            while (auto *Cast = dyn_cast<CastInst>(InitialValue))
+              InitialValue = Cast->getOperand(0);
+            
+            // Check if initial value is (M - 1)
+            if (auto *BinOp = dyn_cast<BinaryOperator>(InitialValue)) {
+              if (BinOp->getOpcode() == Instruction::Sub) {
+                // Initial = M - 1, so M = operand(0).
+                M = BinOp->getOperand(0);
+              } else if (BinOp->getOpcode() == Instruction::Add) {
+                // Initial = M + (-1), extract M.
+                if (auto *C = dyn_cast<ConstantInt>(BinOp->getOperand(1))) {
+                  if (C->getSExtValue() == -1)
+                    M = BinOp->getOperand(0);
+                }
+              }
+            } else {
+              // Initial value is M directly (starts at M, decrements to 1).
+              M = InitialValue;
+            }
+            
+            if (!M)
+              continue;
+            
+            KT = Kernel::KernelType::TRMM_KERNEL;
+          }
         } else
           continue;
 

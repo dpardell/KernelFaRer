@@ -1,5 +1,4 @@
 .cache/
-code/
 build/
 compile_commands.json
 lit-tests/.lit_test_times.txt

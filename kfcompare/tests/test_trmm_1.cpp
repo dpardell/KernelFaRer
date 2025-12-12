@@ -14,8 +14,8 @@ int main(int argc, char** argv) {
     kfcompare::Matrix<float> A(M, M), B(M, N), B_init(M, N);
     
     return kfcompare::run<float>(cfg, "trmm_1 (basicStrmmUpper)",
-        [&]{ basicStrmmUpper_baseline(M, N, alpha, A.data(), M, B.data(), M); },
-        [&]{ basicStrmmUpper_kfarer(M, N, alpha, A.data(), M, B.data(), M); },
+        [&]{ basicStrmmUpper_baseline(M, N, alpha, A.data(), M, B.data(), N); },
+        [&]{ basicStrmmUpper_kfarer(M, N, alpha, A.data(), M, B.data(), N); },
         [&]{ B.copy_from(B_init); },
         [&](unsigned seed){ A.randomize_ints(seed, 3); B_init.randomize_ints(seed+1, 3); B.copy_from(B_init); },
         B.data(), B.size(), 1e-5
