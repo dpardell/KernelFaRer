@@ -335,7 +335,6 @@ void buildBLASGEMMCall(Module &Mod, IRBuilder<> &IR,
     Value *IncKVal = getIncOrOne(IR, IncK, Downcast);
     LDA = IR.CreateMul(LDA, IncKVal);
     LDB = IR.CreateMul(LDB, IncKVal);
-    LDC = IR.CreateMul(LDC, IncKVal);
   }
   
   // Adjust dimensions M, N, K based on increments.
@@ -821,6 +820,8 @@ bool runImpl(Function &F, KernelMatcher::Result &GMPR, OptimizationRemarkEmitter
       const Matrix &MB = GEMM->getMatrixB();
       const Matrix &MC = GEMM->getMatrixC();
       bool AIsRowMajor = MA.getLayout() == KernelFaRer::RowMajor;
+      bool AIsColMajor = MA.getLayout() == KernelFaRer::ColMajor;
+      bool BIsRowMajor = MB.getLayout() == KernelFaRer::RowMajor;
       bool BIsColMajor = MB.getLayout() == KernelFaRer::ColMajor;
       bool CIsRowMajor = MC.getLayout() == KernelFaRer::RowMajor;
       bool CIsColMajor = MC.getLayout() == KernelFaRer::ColMajor;
@@ -843,11 +844,13 @@ bool runImpl(Function &F, KernelMatcher::Result &GMPR, OptimizationRemarkEmitter
         }
       }
       
-      // Validation: Cannot skip in K dimension (reduction dimension)
+      // Validation: Can only skip k if A is column major AND B is row major
       // This check applies to both constant and non-constant increments
       if (!isIncOne(IncK)) {
-        ORE.emit(ORM << "Cannot skip elements in reduction dimension K. Cannot replace kernel code.");
-        continue;
+        if (!(AIsColMajor && BIsRowMajor)) {
+          ORE.emit(ORM << "Cannot skip elements in K dimension: requires A to be column major and B to be row major. Cannot replace kernel code.");
+          continue;
+        }
       }
     }
 
